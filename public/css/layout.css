@@ -1,0 +1,191 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  padding: 20px;
+  min-height: 100vh;
+}
+
+#app {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.main-card {
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 28px 32px;
+  margin-bottom: 24px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 24px;
+  background: var(--topbar-bg);
+  border-radius: 60px;
+  padding: 12px 24px;
+  box-shadow: var(--shadow);
+}
+
+.brand h1 {
+  font-size: 1.5rem;
+  color: var(--primary);
+}
+.brand p {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.topbar-btns {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.pill {
+  background: var(--gray-100);
+  border: none;
+  padding: 6px 14px;
+  border-radius: 40px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-color);
+  transition: background 0.2s;
+}
+.pill:hover {
+  background: var(--gray-200);
+}
+.pill-green { background: #15803d20; color: #15803d; }
+.dark .pill-green { background: #34d39920; color: #34d399; }
+.pill-amber { background: #b4530920; color: #b45309; }
+.dark .pill-amber { background: #fbbf2420; color: #fbbf24; }
+.pill-blue { background: #1e40af20; color: #1e40af; }
+.dark .pill-blue { background: #60a5fa20; color: #60a5fa; }
+.pill-danger { background: #b91c1c20; color: #b91c1c; }
+.dark .pill-danger { background: #f8717120; color: #f87171; }
+.pill-gray { background: var(--gray-200); color: var(--gray-700); }
+.dark .pill-gray { background: var(--gray-300); color: var(--gray-900); }
+
+.btn {
+  border: none;
+  padding: 10px 20px;
+  border-radius: 40px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s;
+  font-size: 0.9rem;
+}
+.btn-primary {
+  background: var(--primary);
+  color: white;
+}
+.btn-primary:hover { background: var(--primary-dark); }
+.btn-secondary {
+  background: var(--gray-200);
+  color: var(--gray-800);
+}
+.btn-secondary:hover { background: var(--gray-300); }
+.btn-success {
+  background: var(--success);
+  color: white;
+}
+.btn-warn {
+  background: var(--warning);
+  color: white;
+}
+.btn-sm {
+  padding: 6px 14px;
+  font-size: 0.8rem;
+}
+.btn-large {
+  padding: 14px 32px;
+  font-size: 1.1rem;
+}
+
+.input-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.input-row div label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 6px;
+  font-size: 0.85rem;
+  color: var(--text-color);
+}
+input, select, textarea {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1.5px solid var(--input-border);
+  border-radius: 20px;
+  font-size: 0.9rem;
+  background: var(--input-bg);
+  color: var(--text-color);
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.phase-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 24px;
+  background: var(--gray-50);
+  padding: 10px 16px;
+  border-radius: 60px;
+}
+.phase-dot {
+  width: 32px;
+  height: 32px;
+  background: var(--gray-200);
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-color);
+}
+.phase-dot.active { background: var(--primary); color: white; }
+.phase-dot.done { background: var(--success); color: white; }
+.phase-line { width: 20px; height: 2px; background: var(--gray-300); }
+.phase-label { margin-left: 12px; font-weight: 600; font-size: 0.85rem; color: var(--text-color); }
+
+.actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 24px;
+  flex-wrap: wrap;
+}
+
+.pcode-box {
+  background: var(--gray-100);
+  border-radius: 20px;
+  padding: 12px 20px;
+  text-align: center;
+  margin-bottom: 20px;
+}
+.pcode-num {
+  font-family: monospace;
+  font-size: 1.6rem;
+  font-weight: bold;
+  letter-spacing: 2px;
+  background: var(--card-bg);
+  display: inline-block;
+  padding: 6px 18px;
+  border-radius: 40px;
+  color: var(--primary);
+  }
