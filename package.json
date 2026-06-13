@@ -1,0 +1,19 @@
+{
+  "name": "research-portal-combined",
+  "version": "2.0.0",
+  "description": "Research Portal with backend + frontend (multi‑study platform)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "connect-pg-simple": "^9.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "nodemailer": "^8.0.11",
+    "pg": "^8.11.3"
+  }
+}
