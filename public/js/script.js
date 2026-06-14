@@ -342,7 +342,7 @@ function renderHero() {
         <div><label>Full name *</label><input id="inpName" placeholder="e.g. Amina Bello" /></div>
         <div><label>Student ID / Matric number *</label><input id="inpMatric" placeholder="NDCS/024/2002" /></div>
         <div><label>Email address *</label><input id="inpEmail" type="email" placeholder="a.bello@student.edu" /></div>
-        <div><label>Gender</label><select id="inpGender"><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="non-binary">Non-binary</option><option value="other">Other</option></select></div>
+        <div><label>Gender</label><select id="inpGender"><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option></select></div>
         <div><label>Academic session (e.g., 2025/2026)</label><input id="inpSession" placeholder="2025/2026" /></div>
         <div><label>Class section</label><input id="inpSection" placeholder="A/B/C" /></div>
       </div>
