@@ -256,11 +256,28 @@ app.post('/api/enrol', async (req, res) => {
 app.get('/api/enrolments/me', async (req, res) => {
   const { code } = req.query;
   if (!code) return res.status(400).json({ error: 'participant_code required' });
-  const { data: participant } = await sb.from('participants').select('id').eq('participant_code', code).single();
-  if (!participant) return res.status(404).json({ error: 'Participant not found' });
-  const { data, error } = await sb.from('enrolments').select(`*, study:study_id (id, study_key, title_en, title_ha, status)`).eq('participant_id', participant.id);
+  const { data: participant, error: pErr } = await sb
+    .from('participants')
+    .select('id, name, email, gender, participant_code')
+    .eq('participant_code', code)
+    .single();
+  if (pErr || !participant) return res.status(404).json({ error: 'Participant not found' });
+  const { data, error } = await sb
+    .from('enrolments')
+    .select(`*, study:study_id (id, study_key, title_en, title_ha, status)`)
+    .eq('participant_id', participant.id);
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  // Attach participant info to each enrolment (or send separately)
+  const result = data.map(enrol => ({
+    ...enrol,
+    participant: {
+      name: participant.name,
+      email: participant.email,
+      gender: participant.gender,
+      participant_code: participant.participant_code
+    }
+  }));
+  res.json(result);
 });
 
 app.get('/api/progress/:enrolmentId', async (req, res) => {

@@ -59,7 +59,8 @@ let S = {
     followup: false
   },
   puzzlesCompletedCount: 0,
-  totalPuzzles: 0
+  totalPuzzles: 0,
+  postTestPending: false
 };
 
 // ============================================================
@@ -99,6 +100,17 @@ function formatDuration(ms) {
   const seconds = Math.floor((ms % 60000) / 1000);
   return `${minutes} min ${seconds} sec`;
 }
+function formatElapsedTime(ms) {
+  if (!ms || ms <= 0) return 'Just started';
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return 'Less than a minute';
+}
 function escapeHtml(str) {
   if (!str) return '';
   return str.replace(/[&<>]/g, m => m === '&' ? '&amp;' : m === '<' ? '&lt;' : '&gt;');
@@ -111,7 +123,7 @@ function getProgrammeType(matric) {
 }
 
 // ============================================================
-// SAVE / LOAD PROGRESS (with participant-code scoped keys)
+// LOCALSTORAGE KEYS
 // ============================================================
 function getStorageKey() {
   return `research_${S.participantCode}_${S.currentEnrolmentId}`;
@@ -119,7 +131,6 @@ function getStorageKey() {
 function saveLocalProgress() {
   if (!S.currentEnrolmentId || !S.participantCode) return;
   if (!S.metrics) S.metrics = { puzzles: {} };
-  
   const toStore = {
     phase: S.phase,
     puzzleIdx: S.puzzleIdx,
@@ -145,7 +156,7 @@ function saveLocalProgress() {
     completedPhases: { ...S.completedPhases },
     puzzlesCompletedCount: S.puzzlesCompletedCount,
     totalPuzzles: S.totalPuzzles,
-    // Resume state snapshot
+    postTestPending: S.postTestPending,
     _resumeState: {
       phase: S.phase,
       puzzleIdx: S.puzzleIdx,
@@ -182,7 +193,8 @@ function loadLocalProgress() {
     S.assAnswers = saved.assAnswers || [];
     S.completedPhases = saved.completedPhases || { survey: false, pretest: false, puzzles: false, posttest: false, followup: false };
     S.puzzlesCompletedCount = saved.puzzlesCompletedCount || 0;
-    if (S.studyConfig) S.totalPuzzles = S.studyConfig.puzzles?.length || saved.totalPuzzles || 0;
+    S.totalPuzzles = saved.totalPuzzles || (S.studyConfig?.puzzles?.length || 0);
+    S.postTestPending = saved.postTestPending || false;
     return saved;
   } catch(e) { console.warn('Failed to parse saved progress', e); return null; }
 }
@@ -342,7 +354,7 @@ function renderHero() {
         <div><label>Full name *</label><input id="inpName" placeholder="e.g. Amina Bello" /></div>
         <div><label>Student ID / Matric number *</label><input id="inpMatric" placeholder="NDCS/024/2002" /></div>
         <div><label>Email address *</label><input id="inpEmail" type="email" placeholder="a.bello@student.edu" /></div>
-        <div><label>Gender</label><select id="inpGender"><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="non-binary">Non-binary</option><option value="other">Other</option></select></div>
+        <div><label>Gender</label><select id="inpGender"><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option></select></div>
         <div><label>Academic session (e.g., 2025/2026)</label><input id="inpSession" placeholder="2025/2026" /></div>
         <div><label>Class section</label><input id="inpSection" placeholder="A/B/C" /></div>
       </div>
@@ -403,6 +415,9 @@ function bindHero() {
       const tempEnrol = await apiEnrol(name, matric, 'en', S.availableStudies[0].id, { gender }, false, academicSession, classSection, '', email, gender);
       S.participantCode = tempEnrol.participantCode;
       S.randomisationGroup = tempEnrol.randomisationGroup;
+      S.currentEnrolmentId = tempEnrol.enrolmentId;
+      // ✅ Save immediately – stores name, code, enrolment id
+      saveLocalProgress();
       S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
       const existingEnrol = S.myEnrolments.find(e => e.status !== 'completed');
       if (existingEnrol) {
@@ -420,12 +435,16 @@ function bindHero() {
           S.currentStudyId = existingEnrol.study_id;
           S.studyConfig = await apiFetchStudyConfig(S.currentStudyId);
           S.totalPuzzles = S.studyConfig?.puzzles?.length || 0;
+          // Ensure name is not overwritten by generic value
+          if (!S.participantName || S.participantName === 'Participant') {
+            S.participantName = name;
+          }
           S.phase = 'resume';
         } else {
-          // Fresh enrolment, no progress
           S.metrics = { startedAt: Date.now(), puzzles: {} };
           S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false };
           S.puzzlesCompletedCount = 0;
+          S.postTestPending = false;
           S.surveyAnswers = {};
           S.assAnswers = [];
           S.currentStudyId = existingEnrol.study_id;
@@ -454,10 +473,21 @@ function bindHero() {
       S.currentStudyId = active.study_id;
       S.studyConfig = config;
       S.totalPuzzles = config.puzzles.length;
-      S.participantName = active.participant?.name || 'Participant';
+      // Try to get name from saved progress first
       const local = loadLocalProgress();
-      if (local) { Object.assign(S, local); S.studyConfig = config; }
-      else { const remote = await apiLoadProgress(active.id); if (remote?.progress) Object.assign(S, remote.progress); }
+      if (local) {
+        Object.assign(S, local);
+        S.studyConfig = config;
+        // Use saved name if available, otherwise fallback to API name
+        if (!S.participantName || S.participantName === 'Participant') {
+          S.participantName = active.participant?.name || 'Participant';
+        }
+      } else {
+        const remote = await apiLoadProgress(active.id);
+        if (remote?.progress) Object.assign(S, remote.progress);
+        S.studyConfig = config;
+        S.participantName = active.participant?.name || 'Participant';
+      }
       S.phase = 'resume';
       go();
     } catch (e) { document.getElementById('resumeErr').innerText = e.message; }
@@ -468,14 +498,19 @@ function renderResume() {
   const solved = Object.values(m.puzzles || {}).filter(p => p.completed).length;
   const guided = Object.values(m.puzzles || {}).filter(p => p.guided).length;
   const preScore = (m.preScore !== undefined && m.preScore !== null) ? `${m.preScore}%` : '—';
-  const durMin = m.startedAt ? Math.round((Date.now() - m.startedAt) / 60000) : 0;
   const totalPuzzles = S.totalPuzzles || S.studyConfig?.puzzles?.length || 0;
-  return `${topbarHTML()}<div class="main-card"><h2>👋 Welcome back, ${escapeHtml(S.participantName)}</h2>
+  // Calculate time since enrolment
+  const totalElapsed = m.startedAt ? (Date.now() - m.startedAt) : 0;
+  const elapsedFormatted = formatElapsedTime(totalElapsed);
+  const displayName = (S.participantName && S.participantName.trim() !== '') ? S.participantName : 'Participant';
+  return `${topbarHTML()}<div class="main-card"><h2>👋 Welcome back, ${escapeHtml(displayName)}</h2>
     <div class="pcode-box"><p>Your participant code:</p><div class="pcode-num">${S.participantCode}</div></div>
-    <div class="resume-grid"><div class="resume-stat"><div class="rnum">${solved}/${totalPuzzles}</div><div class="rlbl">Puzzles solved</div></div>
-    <div class="resume-stat"><div class="rnum">${guided}</div><div class="rlbl">Needed guidance</div></div>
-    <div class="resume-stat"><div class="rnum">${preScore}</div><div class="rlbl">Pre-test %</div></div>
-    <div class="resume-stat"><div class="rnum">${durMin}</div><div class="rlbl">Minutes spent</div></div></div>
+    <div class="resume-grid">
+      <div class="resume-stat"><div class="rnum">${solved}/${totalPuzzles}</div><div class="rlbl">Puzzles solved</div></div>
+      <div class="resume-stat"><div class="rnum">${guided}</div><div class="rlbl">Needed guidance</div></div>
+      <div class="resume-stat"><div class="rnum">${preScore}</div><div class="rlbl">Pre-test %</div></div>
+      <div class="resume-stat"><div class="rnum">${elapsedFormatted}</div><div class="rlbl">Time since you started</div></div>
+    </div>
     <div class="example-box" style="background:#eff6ff">Pick up exactly where you left off.</div>
     <div class="actions"><button class="btn btn-primary" id="btnResumeContinue">▶ Resume</button>
     <button class="btn btn-secondary" id="btnResumeRestart">↺ Start fresh</button></div></div>`;
@@ -483,37 +518,102 @@ function renderResume() {
 function bindResume() {
   const continueBtn = document.getElementById('btnResumeContinue');
   const restartBtn = document.getElementById('btnResumeRestart');
+  
+  // If post‑test is pending, show waiting message
+  if (S.postTestPending) {
+    S.phase = 'complete';
+    go();
+    return;
+  }
+  
+  // If survey completed but pre‑test not started, go directly to pre‑test
+  if (S.completedPhases.survey && !S.completedPhases.pretest && !S.completedPhases.puzzles) {
+    S.phase = 'pre';
+    S.assMode = 'pre';
+    S.assQ = 0;
+    S.assAnswers = [];
+    go();
+    return;
+  }
+  
   continueBtn?.addEventListener('click', () => {
-    // Use _resumeState if present (saved on every progress)
+    // Prefer _resumeState if present
     const rs = S._resumeState || S.metrics?._resumeState;
     if (rs) {
-      S.phase = rs.phase || 'survey';
-      S.puzzleIdx = rs.puzzleIdx || 0;
-      S.assQ = rs.assQ || 0;
-      S.assAnswers = rs.assAnswers || [];
-      S.assMode = rs.assMode || 'pre';
-      S.surveyAnswers = rs.surveyAnswers || {};
-      S.reviewQueue = rs.reviewQueue || [];
-      S.reviewIdx = rs.reviewIdx || 0;
-      S.available = rs.available || [];
-      S.userSeq = rs.userSeq || [];
-      S.fadedLocked = rs.fadedLocked || [];
+      // If saved phase is 'survey' but survey already completed, skip to pre‑test
+      if (rs.phase === 'survey' && S.completedPhases.survey) {
+        S.phase = 'pre';
+        S.assMode = 'pre';
+        S.assQ = 0;
+        S.assAnswers = [];
+      } else {
+        S.phase = rs.phase || 'survey';
+        S.puzzleIdx = rs.puzzleIdx || 0;
+        S.assQ = rs.assQ || 0;
+        S.assAnswers = rs.assAnswers || [];
+        S.assMode = rs.assMode || 'pre';
+        S.surveyAnswers = rs.surveyAnswers || {};
+        S.reviewQueue = rs.reviewQueue || [];
+        S.reviewIdx = rs.reviewIdx || 0;
+        S.available = rs.available || [];
+        S.userSeq = rs.userSeq || [];
+        S.fadedLocked = rs.fadedLocked || [];
+      }
     } else {
-      // Fallback to phase flags (old method)
+      // Fallback to phase flags
       if (S.completedPhases.posttest) { S.phase='complete'; go(); return; }
       if (S.completedPhases.puzzles && !S.completedPhases.posttest) {
         const minDays = S.studyConfig?.min_days_between_pretest_posttest || 0;
         if (minDays > 0 && S.metrics?.preCompletedAt) {
           const daysSince = (Date.now() - new Date(S.metrics.preCompletedAt)) / (86400000);
-          if (daysSince < minDays) { alert(`Post‑test available in ${Math.ceil(minDays-daysSince)} days.`); S.phase='complete'; go(); return; }
+          if (daysSince < minDays) {
+            S.postTestPending = true;
+            S.phase = 'complete';
+            saveLocalProgress();
+            go();
+            return;
+          } else {
+            S.phase = 'post';
+            S.assMode = 'post';
+            S.assQ = 0;
+            S.assAnswers = [];
+            go();
+            return;
+          }
+        } else {
+          S.phase = 'post';
+          S.assMode = 'post';
+          S.assQ = 0;
+          S.assAnswers = [];
+          go();
+          return;
         }
-        S.phase='post'; S.assMode='post'; S.assQ=0; S.assAnswers=[]; go(); return;
       }
       if (S.completedPhases.pretest && !S.completedPhases.puzzles) { S.phase='study'; S.puzzleIdx=S.puzzlesCompletedCount; go(); return; }
       if (S.completedPhases.survey && !S.completedPhases.pretest) { S.phase='pre'; S.assMode='pre'; S.assQ=S.assAnswers.length; go(); return; }
     }
+    
+    // NEW: If we are in reflect or code phase for a puzzle that is already completed, skip to next puzzle/review
+    if ((S.phase === 'reflect' || S.phase === 'code') && S.studyConfig && S.puzzleIdx !== undefined) {
+      const currentPuzzle = S.studyConfig.puzzles[S.puzzleIdx];
+      if (currentPuzzle && S.metrics?.puzzles?.[currentPuzzle.id]?.completed) {
+        // Move to next puzzle or review
+        if (S.puzzleIdx < S.studyConfig.puzzles.length - 1) {
+          S.puzzleIdx++;
+          S.phase = 'study';
+          saveLocalProgress();
+        } else {
+          // All puzzles completed, go to review
+          initReviewDynamic();
+        }
+        go();
+        return;
+      }
+    }
+    
     go();
   });
+  
   restartBtn?.addEventListener('click', () => {
     if(confirm('Erase all progress?')){
       localStorage.removeItem(getStorageKey());
@@ -522,6 +622,7 @@ function bindResume() {
       S.puzzlesCompletedCount = 0;
       S.surveyAnswers = {};
       S.assAnswers = [];
+      S.postTestPending = false;
       S.phase = 'orient';
       saveLocalProgress();
       go();
@@ -572,7 +673,6 @@ function bindStudySelect() {
 }
 async function onSelectStudy(studyId) {
   try {
-    // Check if study already completed but post-test pending
     const existingEnrol = S.myEnrolments.find(e => e.study_id === studyId);
     if (existingEnrol && (existingEnrol.status === 'completed' || S.completedPhases.puzzles) && !S.completedPhases.posttest) {
       const minDays = S.studyConfig?.min_days_between_pretest_posttest || 0;
@@ -618,6 +718,7 @@ async function onSelectStudy(studyId) {
       S.metrics = { startedAt: Date.now(), puzzles: {} };
       S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false };
       S.puzzlesCompletedCount = 0;
+      S.postTestPending = false;
       S.surveyAnswers = {};
       S.assAnswers = [];
       S.assQ = 0;
@@ -680,7 +781,6 @@ function bindConsent() {
   nextBtn.addEventListener('click', () => {
     if (!chk.checked) { alert('Please check the consent box to continue.'); return; }
     S.consentGeneral = true;
-    // Only clear survey answers if they are empty (do not wipe existing)
     if (!S.surveyAnswers || Object.keys(S.surveyAnswers).length === 0) {
       S.surveyAnswers = {};
     }
@@ -733,15 +833,16 @@ function bindSurveyDynamic() {
   document.querySelectorAll('.sv-lk').forEach(radio => { radio.addEventListener('change', () => { if (radio.checked) S.surveyAnswers[radio.dataset.field] = parseInt(radio.value); updateBtn(); saveLocalProgress(); }); });
   updateBtn();
   el('btnSurveyNext')?.addEventListener('click', () => {
-    S.completedPhases.survey = true;
-    S.inProgressPhase = 'pretest';
-    saveLocalProgress();
-    S.phase = 'pre';
-    S.assMode = 'pre';
-    S.assQ = 0;
-    S.assAnswers = [];
-    go();
-  });
+  S.completedPhases.survey = true;
+  S.inProgressPhase = 'pretest';
+  saveLocalProgress();                    // save before phase change
+  S.phase = 'pre';
+  S.assMode = 'pre';
+  S.assQ = 0;
+  S.assAnswers = [];
+  saveLocalProgress();                    // save AFTER phase change
+  go();
+});
 }
 function renderAssessmentDynamic(mode) {
   if (mode === 'post' && !canStartPostTest()) {
@@ -775,12 +876,14 @@ function bindAssessmentDynamic(mode) {
         saveLocalProgress();
         S.phase = 'study';
         S.puzzleIdx = 0;
+        saveLocalProgress();   // <-- ADD THIS    
         go();
       } else {
         S.completedPhases.posttest = true;
         S.metrics.postScore = total;
         S.metrics.postTestTaken = true;
         S.metrics.mainCompletedAt = new Date().toISOString();
+        S.postTestPending = false;
         const weeks = S.studyConfig.delayed_post_test_weeks || 0;
         if (weeks > 0) {
           const followupDate = new Date();
@@ -876,6 +979,7 @@ function puzMetric(id) {
 function bindAttemptDynamic(reviewMode = false) {
   const p = reviewMode ? S.studyConfig.puzzles[S.reviewQueue[S.reviewIdx]] : S.studyConfig.puzzles[S.puzzleIdx];
   if (!p) { console.error('bindAttemptDynamic: puzzle not found'); return; }
+  
   const expectedCards = p.cards.map(c=>c.id).sort().join(',');
   const actualCards = [...S.available,...S.userSeq].map(c=>c.id).sort().join(',');
   if (expectedCards !== actualCards) {
@@ -884,12 +988,15 @@ function bindAttemptDynamic(reviewMode = false) {
     S.userSeq = [];
     renderCardsDynamic();
   } else { renderCardsDynamic(); }
+  
   el('btnReset')?.addEventListener('click',()=>{ S.fadedLocked = []; S.available = shuffle([...p.cards]); S.userSeq = []; renderCardsDynamic(); const fb = el('attemptFB'); if(fb) fb.className='feedback-box fb-neutral'; const hb = el('attemptHint'); if(hb) hb.style.display='none'; const mb = el('attemptMiscon'); if(mb) mb.style.display='none'; saveLocalProgress(); });
   el('btnPrint')?.addEventListener('click',()=>window.print());
+  
   const submitBtn = el('btnSubmit');
   if (!submitBtn) { console.error('Submit button not found'); return; }
   const newSubmit = submitBtn.cloneNode(true);
   submitBtn.parentNode.replaceChild(newSubmit, submitBtn);
+  
   newSubmit.onclick = () => {
     const m = reviewMode ? null : puzMetric(p.id);
     if (!reviewMode && !m) return;
@@ -898,6 +1005,7 @@ function bindAttemptDynamic(reviewMode = false) {
     const fb = el('attemptFB'), hb = el('attemptHint'), mb = el('attemptMiscon');
     const key = order.join(',');
     const miscon = p.misconceptions?.[key];
+    
     if (correct) {
       if (!reviewMode) {
         if (!S.metrics.puzzles[p.id]) S.metrics.puzzles[p.id] = {};
@@ -922,19 +1030,18 @@ function bindAttemptDynamic(reviewMode = false) {
             if (rp) { S.fadedLocked = []; S.available = shuffle(rp.cards); S.userSeq = []; }
             go();
           } else {
+            // Last review puzzle completed
             if (canStartPostTest()) {
               S.phase = 'post';
               S.assMode = 'post';
               S.assQ = 0;
               S.assAnswers = [];
+              saveLocalProgress();
               go();
             } else {
-              const minDays = S.studyConfig.min_days_between_pretest_posttest || 0;
-              const preDate = new Date(S.metrics.preCompletedAt);
-              const now = new Date();
-              const daysLeft = Math.ceil((preDate.getTime() + minDays * 24*60*60*1000 - now.getTime()) / (24*60*60*1000));
-              alert(`Post‑test available after ${minDays} day(s). Please return in ${daysLeft} day(s).`);
-              S.phase = 'studySelect';
+              S.postTestPending = true;
+              S.phase = 'complete';
+              saveLocalProgress();
               go();
             }
           }
@@ -981,7 +1088,7 @@ function initReviewDynamic() {
   S.reviewQueue = shuffle(pool).slice(0,3);
   S.reviewIdx = 0;
   S.phase = 'review';
-  saveLocalProgress();   // Save review state
+  saveLocalProgress();
   const rp = S.studyConfig.puzzles[S.reviewQueue[0]];
   if(rp){ S.fadedLocked=[]; S.available=shuffle(rp.cards); S.userSeq=[]; }
 }
@@ -1015,6 +1122,19 @@ function renderDebrief() {
 }
 function bindDebrief() { el('btnDebriefNext')?.addEventListener('click',()=>{ S.phase='complete'; go(); }); }
 async function renderComplete() {
+  if (S.postTestPending && S.studyConfig?.min_days_between_pretest_posttest > 0) {
+    const preDate = new Date(S.metrics.preCompletedAt);
+    const now = new Date();
+    const minDays = S.studyConfig.min_days_between_pretest_posttest;
+    const daysSincePre = (now - preDate) / (1000 * 60 * 60 * 24);
+    const daysLeft = Math.ceil(minDays - daysSincePre);
+    return `${topbarHTML()}<div class="main-card">
+      <h2>Post‑test waiting period</h2>
+      <p>You have completed the main study. The post‑test will be available in <strong>${daysLeft} day(s)</strong>.</p>
+      <p>You will be able to take it when you return after ${minDays} days from your pre‑test.</p>
+      <div class="actions"><button class="btn btn-primary" id="btnBackToStudies">← Back to Studies</button></div>
+    </div>`;
+  }
   const solved = Object.values(S.metrics?.puzzles||{}).filter(p=>p.completed).length;
   let peerHtml = '';
   if (API_BASE !== undefined && S.currentStudyId) {
@@ -1251,7 +1371,6 @@ async function go() {
       S.totalPuzzles = S.studyConfig.puzzles?.length || 0;
     } catch(e) { alert('Could not load study. Please try again.'); S.phase='hero'; go(); return; }
   }
-  // Only redirect to orient if genuinely no progress (respect completed flags)
   const needsProgress = ['pre','study','faded','attempt','reflect','code','review','post'];
   if (needsProgress.includes(S.phase)) {
     const hasRealProgress = S.completedPhases.survey || S.completedPhases.pretest || S.completedPhases.puzzles || 
@@ -1261,7 +1380,6 @@ async function go() {
       S.phase = 'orient';
     }
   }
-  // Avoid re-entering pre-test if already completed
   if (S.phase === 'pre' && S.completedPhases.pretest) {
     S.phase = 'study';
     S.puzzleIdx = S.puzzlesCompletedCount;
