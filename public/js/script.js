@@ -32,6 +32,7 @@ let S = {
   participantGender: '',
   demographics: {},
   consentGeneral: false,
+  gradeConsent: false,
   currentEnrolmentId: null,
   currentStudyId: null,
   randomisationGroup: null,
@@ -47,6 +48,7 @@ let S = {
   lang: 'en',
   availableStudies: [],
   myEnrolments: [],
+  resumeCandidates: [],
   lastInteraction: Date.now(),
   timeoutWarningShown: false,
   timeoutInterval: null,
@@ -150,6 +152,7 @@ function saveLocalProgress() {
     participantCode: S.participantCode,
     randomisationGroup: S.randomisationGroup,
     consentGeneral: S.consentGeneral,
+    gradeConsent: S.gradeConsent,            // <-- ADDED
     audioOn: S.audioOn,
     participantEmail: S.participantEmail,
     participantGender: S.participantGender,
@@ -195,6 +198,7 @@ function loadLocalProgress() {
     S.puzzlesCompletedCount = saved.puzzlesCompletedCount || 0;
     S.totalPuzzles = saved.totalPuzzles || (S.studyConfig?.puzzles?.length || 0);
     S.postTestPending = saved.postTestPending || false;
+    S.gradeConsent = saved.gradeConsent || false;   // <-- ADDED
     return saved;
   } catch(e) { console.warn('Failed to parse saved progress', e); return null; }
 }
@@ -230,7 +234,10 @@ async function apiLoadProgress(enrolmentId) {
   return res.json();
 }
 async function apiWithdraw(enrolmentId) {
-  await fetch(`${API_BASE}/api/enrolment/${enrolmentId}/withdraw`,{method:'POST'});
+  if(!API_BASE && API_BASE !== '') return;
+  const res = await fetch(`${API_BASE}/api/enrolment/${enrolmentId}/withdraw`, { method: 'POST' });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 async function apiAverageGain(studyId) {
   try { const res = await fetch(`${API_BASE}/api/study/${studyId}/average_gain`); if(!res.ok) return null; return res.json(); } catch(e){ return null; }
@@ -301,8 +308,19 @@ function showTimeoutToast() {
 function topbarHTML() {
   const themeIcon = theme === 'dark' ? '☀️' : '🌙';
   const themeText = theme === 'dark' ? 'Light' : 'Dark';
+  
+  // Define phases where we are inside a study (not on study selection, registration, etc.)
+  const insideStudy = ['orient','consent','survey','pre','study','faded','attempt','reflect','code','review','post','followup','guided','debrief','complete','resume'].includes(S.phase);
+  const studyContext = (insideStudy && S.studyConfig && S.studyConfig.title_en) 
+    ? `<div style="font-size:0.8rem; color:var(--primary); margin-top:4px;">📖 ${S.studyConfig.title_en}</div>` 
+    : '';
+  
   return `<div class="topbar">
-    <div class="brand"><h1>🔬 Research Portal</h1><p>Multi‑study research participation hub</p></div>
+    <div class="brand">
+      <h1>🔬 Research Portal</h1>
+      <p>Multi‑study research participation hub</p>
+      ${studyContext}
+    </div>
     <div class="topbar-btns">
       <button class="pill" id="btnTheme">${themeIcon} ${themeText}</button>
       <button class="pill ${S.audioOn?'pill-green':'pill-gray'}" id="btnAudio">${S.audioOn?'🔊':'🔇'} Audio</button>
@@ -314,52 +332,53 @@ function topbarHTML() {
   </div>`;
 }
 function phaseStripHTML() {
-  if(S.phase === 'hero' || S.phase === 'studySelect' || S.phase === 'adminLogin' || S.phase === 'dashboard') return '';
-  const phases = [
-    {k:'pre', l:'Pre-test'},
-    {k:'learn',l:'Learn'},
-    {k:'review',l:'Review'},
-    {k:'post',l:'Post-test'},
-    {k:'complete',l:'Done'}
-  ];
-  const groupMap = {orient:'pre',consent:'pre',survey:'pre',pre:'pre',study:'learn',faded:'learn',attempt:'learn',reflect:'learn',code:'learn',review:'review',post:'post',debrief:'post',complete:'complete',followup:'post',guided:'learn'};
-  const cur = groupMap[S.phase] || 'pre';
-  const order = ['pre','learn','review','post','complete'];
-  const curIdx = order.indexOf(cur);
-  return `<div class="phase-strip">${order.map((p,i)=>{
-    const ph = phases.find(x=>x.k===p);
-    const st = i<curIdx?'done':i===curIdx?'active':'';
-    return `<span class="phase-dot ${st}" title="${ph.l}">${p==='pre'?'📋':p==='learn'?'👁':p==='review'?'🔁':p==='post'?'📋':'🎓'}</span>${i<order.length-1?'<span class="phase-line"></span>':''}`;
-  }).join('')}<span class="phase-label">${phases.find(x=>x.k===cur).l}</span></div>`;
+  const hidePhases = ['hero','studySelect','adminLogin','dashboard','register','resume'];
+  if (hidePhases.includes(S.phase)) return '';
+
+  let phases = S.studyConfig?.phases;
+  if (!phases || phases.length === 0) {
+    phases = [
+      { id: 'pre', label: 'Pre-test', icon: '📋' },
+      { id: 'learn', label: 'Learn', icon: '👁' },
+      { id: 'review', label: 'Review', icon: '🔁' },
+      { id: 'post', label: 'Post-test', icon: '📋' },
+      { id: 'complete', label: 'Done', icon: '🎓' }
+    ];
+  }
+
+  const phaseMap = {
+    'orient': 'pre', 'consent': 'pre', 'survey': 'survey',
+    'pre': 'pre', 'study': 'learn', 'faded': 'learn', 'attempt': 'learn',
+    'reflect': 'learn', 'code': 'learn', 'review': 'review',
+    'post': 'post', 'debrief': 'post', 'complete': 'complete',
+    'followup': 'post', 'guided': 'learn'
+  };
+  const mappedPhase = phaseMap[S.phase] || S.phase;
+  const order = phases.map(p => p.id);
+  const currentIndex = order.indexOf(mappedPhase);
+  if (currentIndex === -1) return '';
+
+  return `<div class="phase-strip">${phases.map((p, i) => {
+    const st = i < currentIndex ? 'done' : i === currentIndex ? 'active' : '';
+    return `<span class="phase-dot ${st}" title="${p.label}">${p.icon}</span>${i < phases.length - 1 ? '<span class="phase-line"></span>' : ''}`;
+  }).join('')}<span class="phase-label">${phases[currentIndex].label}</span></div>`;
 }
 function renderHero() {
   return `${topbarHTML()}
   <div class="main-card hero-container">
-    <div class="hero-badge">🔬 IRB Approved</div>
+    <div class="hero-badge">🔬 Multi‑Study Research Platform</div>
     <h1 class="hero-title">Research Participation Portal</h1>
     <p class="hero-subtitle">Contribute to Computing Education Research</p>
     <div class="hero-features">
+      <div class="feature">✓ Multiple studies – choose any that interest you</div>
       <div class="feature">✓ Secure and confidential</div>
       <div class="feature">✓ Ethics approved (REC/NSPoly/CS/2026/___ )</div>
-      <div class="feature">✓ Takes about 30–40 minutes</div>
-      <div class="feature">✓ Receive participation certificate</div>
+      <div class="feature">✓ Takes about 30–40 minutes per study</div>
+      <div class="feature">✓ Receive participation certificate per study</div>
     </div>
     <div class="hero-buttons">
       <button class="btn btn-primary btn-large" id="btnStartParticipation">▶ Start Participation</button>
       <button class="btn btn-secondary btn-large" id="btnResumeExisting">↻ Resume Existing Study</button>
-    </div>
-    <div id="registrationPanel" style="display: none; margin-top: 30px; border-top: 2px solid var(--border); padding-top: 24px;">
-      <h3>Register for a study</h3>
-      <div class="input-row">
-        <div><label>Full name *</label><input id="inpName" placeholder="e.g. Amina Bello" /></div>
-        <div><label>Student ID / Matric number *</label><input id="inpMatric" placeholder="NDCS/024/2002" /></div>
-        <div><label>Email address *</label><input id="inpEmail" type="email" placeholder="a.bello@student.edu" /></div>
-        <div><label>Gender</label><select id="inpGender"><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option></select></div>
-        <div><label>Academic session (e.g., 2025/2026)</label><input id="inpSession" placeholder="2025/2026" /></div>
-        <div><label>Class section</label><input id="inpSection" placeholder="A/B/C" /></div>
-      </div>
-      <p id="welcomeErr" style="color:var(--danger);text-align:center"></p>
-      <div class="actions"><button class="btn btn-primary" id="btnRegister">Continue to study selection →</button></div>
     </div>
     <div id="resumePanel" style="display: none; margin-top: 30px; border-top: 2px solid var(--border); padding-top: 24px;">
       <h3>Resume your study</h3>
@@ -373,124 +392,89 @@ function renderHero() {
     </div>
   </div>`;
 }
+
 function bindHero() {
   const startBtn = document.getElementById('btnStartParticipation');
   const resumeBtn = document.getElementById('btnResumeExisting');
-  const regPanel = document.getElementById('registrationPanel');
   const resumePanel = document.getElementById('resumePanel');
-  const registerBtn = document.getElementById('btnRegister');
   const doResumeBtn = document.getElementById('btnDoResume');
 
-  if (regPanel) regPanel.style.display = 'none';
   if (resumePanel) resumePanel.style.display = 'none';
 
   startBtn?.addEventListener('click', () => {
-    if (regPanel) regPanel.style.display = 'block';
-    if (resumePanel) resumePanel.style.display = 'none';
-    regPanel?.scrollIntoView({ behavior: 'smooth' });
+    S.phase = 'register';
+    go();
   });
 
   resumeBtn?.addEventListener('click', () => {
     if (resumePanel) resumePanel.style.display = 'block';
-    if (regPanel) regPanel.style.display = 'none';
     resumePanel?.scrollIntoView({ behavior: 'smooth' });
-  });
-
-  registerBtn?.addEventListener('click', async () => {
-    const name = document.getElementById('inpName')?.value.trim();
-    const matric = document.getElementById('inpMatric')?.value.trim();
-    const email = document.getElementById('inpEmail')?.value.trim();
-    const gender = document.getElementById('inpGender')?.value;
-    if (!name || !matric) { document.getElementById('welcomeErr').innerText = 'Name and Matric number required'; return; }
-    if (!email || !email.includes('@')) { document.getElementById('welcomeErr').innerText = 'Valid email address required'; return; }
-    S.participantName = name;
-    S.participantMatric = matric;
-    S.participantEmail = email;
-    S.participantGender = gender;
-    const academicSession = document.getElementById('inpSession')?.value.trim() || '';
-    const classSection = document.getElementById('inpSection')?.value.trim() || '';
-    S.availableStudies = await apiFetchStudies();
-    if (!S.availableStudies.length) { document.getElementById('welcomeErr').innerText = 'No open studies at this time.'; return; }
-    try {
-      const tempEnrol = await apiEnrol(name, matric, 'en', S.availableStudies[0].id, { gender }, false, academicSession, classSection, '', email, gender);
-      S.participantCode = tempEnrol.participantCode;
-      S.randomisationGroup = tempEnrol.randomisationGroup;
-      S.currentEnrolmentId = tempEnrol.enrolmentId;
-      // ✅ Save immediately – stores name, code, enrolment id
-      saveLocalProgress();
-      S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
-      const existingEnrol = S.myEnrolments.find(e => e.status !== 'completed');
-      if (existingEnrol) {
-        S.currentEnrolmentId = existingEnrol.id;
-        let local = loadLocalProgress();
-        if (!local) { const remote = await apiLoadProgress(existingEnrol.id); if (remote?.progress) local = remote.progress; }
-        const hasRealProgress = local && (
-          Object.keys(local.metrics?.puzzles || {}).length > 0 ||
-          local.completedPhases?.survey ||
-          local.completedPhases?.pretest ||
-          local.assAnswers?.length > 0
-        );
-        if (hasRealProgress) {
-          Object.assign(S, local);
-          S.currentStudyId = existingEnrol.study_id;
-          S.studyConfig = await apiFetchStudyConfig(S.currentStudyId);
-          S.totalPuzzles = S.studyConfig?.puzzles?.length || 0;
-          // Ensure name is not overwritten by generic value
-          if (!S.participantName || S.participantName === 'Participant') {
-            S.participantName = name;
-          }
-          S.phase = 'resume';
-        } else {
-          S.metrics = { startedAt: Date.now(), puzzles: {} };
-          S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false };
-          S.puzzlesCompletedCount = 0;
-          S.postTestPending = false;
-          S.surveyAnswers = {};
-          S.assAnswers = [];
-          S.currentStudyId = existingEnrol.study_id;
-          S.studyConfig = await apiFetchStudyConfig(S.currentStudyId);
-          S.totalPuzzles = S.studyConfig?.puzzles?.length || 0;
-          S.phase = 'orient';
-        }
-      } else {
-        S.phase = 'studySelect';
-      }
-      go();
-    } catch (e) { document.getElementById('welcomeErr').innerText = e.message; }
   });
 
   doResumeBtn?.addEventListener('click', async () => {
     const code = document.getElementById('resumeCode')?.value.trim().toUpperCase();
-    if (!code) { document.getElementById('resumeErr').innerText = 'Please enter your participant code'; return; }
+    if (!code) {
+      document.getElementById('resumeErr').innerText = 'Please enter your participant code';
+      return;
+    }
     try {
       const enrolments = await apiGetMyEnrolments(code);
       if (!enrolments.length) throw new Error('No enrolments found for this code');
-      const active = enrolments.find(e => e.status !== 'completed') || enrolments[0];
-      const config = await apiFetchStudyConfig(active.study_id);
-      if (!config || !config.puzzles) throw new Error('Study configuration missing');
+      
+      // Filter to active enrolments only (exclude withdrawn and completed)
+      const active = enrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
+      if (active.length === 0) {
+        document.getElementById('resumeErr').innerText = 'You have no studies in progress. All are completed or withdrawn.';
+        return;
+      }
+
+      const participant = active[0].participant || {};
       S.participantCode = code;
-      S.currentEnrolmentId = active.id;
-      S.currentStudyId = active.study_id;
+      S.participantName = participant.name || 'Participant';
+      S.participantMatric = participant.matric || '';
+      S.participantEmail = participant.email || '';
+      S.participantGender = participant.gender || '';
+
+      // If multiple studies, show selection screen
+      if (active.length > 1) {
+        S.resumeCandidates = active;
+        S.phase = 'resumeSelect';
+        go();
+        return;
+      }
+
+      // Single study – resume directly
+      const enrol = active[0];
+      const config = await apiFetchStudyConfig(enrol.study_id);
+      if (!config || !config.puzzles) throw new Error('Study configuration missing');
+      S.currentEnrolmentId = enrol.id;
+      S.currentStudyId = enrol.study_id;
       S.studyConfig = config;
       S.totalPuzzles = config.puzzles.length;
-      // Try to get name from saved progress first
-      const local = loadLocalProgress();
-      if (local) {
-        Object.assign(S, local);
-        S.studyConfig = config;
-        // Use saved name if available, otherwise fallback to API name
-        if (!S.participantName || S.participantName === 'Participant') {
-          S.participantName = active.participant?.name || 'Participant';
-        }
-      } else {
-        const remote = await apiLoadProgress(active.id);
+
+      let local = loadLocalProgress();
+      if (local) Object.assign(S, local);
+      else {
+        const remote = await apiLoadProgress(enrol.id);
         if (remote?.progress) Object.assign(S, remote.progress);
-        S.studyConfig = config;
-        S.participantName = active.participant?.name || 'Participant';
       }
+
+      // Check if survey-only and survey completed
+      const hasPre = config.preQ && config.preQ.length > 0;
+      const hasPost = config.postQ && config.postQ.length > 0;
+      const hasPuzzles = config.puzzles && config.puzzles.length > 0;
+      const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles;
+      if (isSurveyOnly && S.completedPhases.survey) {
+        S.phase = 'complete';
+        go();
+        return;
+      }
+
       S.phase = 'resume';
       go();
-    } catch (e) { document.getElementById('resumeErr').innerText = e.message; }
+    } catch (e) {
+      document.getElementById('resumeErr').innerText = e.message;
+    }
   });
 }
 function renderResume() {
@@ -518,34 +502,72 @@ function renderResume() {
 function bindResume() {
   const continueBtn = document.getElementById('btnResumeContinue');
   const restartBtn = document.getElementById('btnResumeRestart');
-  
+
+  // Determine if this is a survey-only study
+  const hasPre = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
+  const hasPost = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
+  const hasPuzzles = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
+  const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles;
+
+  // SURVEY-ONLY HANDLING (top-level)
+  if (isSurveyOnly) {
+    if (S.completedPhases.survey) {
+      // Already completed – go to certificate
+      S.phase = 'complete';
+      go();
+      return;
+    } else {
+      // Not completed – resume at the survey page
+      S.phase = 'survey';
+      // Ensure survey answers are loaded (already in S)
+      go();
+      return;
+    }
+  }
+
   // If post‑test is pending, show waiting message
   if (S.postTestPending) {
     S.phase = 'complete';
     go();
     return;
   }
-  
-  // If survey completed but pre‑test not started, go directly to pre‑test
-  if (S.completedPhases.survey && !S.completedPhases.pretest && !S.completedPhases.puzzles) {
-    S.phase = 'pre';
-    S.assMode = 'pre';
-    S.assQ = 0;
-    S.assAnswers = [];
-    go();
-    return;
-  }
-  
+
   continueBtn?.addEventListener('click', () => {
-    // Prefer _resumeState if present
+    // Re-evaluate survey-only status
+    const hasPre2 = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
+    const hasPost2 = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
+    const hasPuzzles2 = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
+    const isSurveyOnly2 = !hasPre2 && !hasPost2 && !hasPuzzles2;
+
+    if (isSurveyOnly2) {
+      if (S.completedPhases.survey) {
+        S.phase = 'complete';
+        go();
+        return;
+      } else {
+        S.phase = 'survey';
+        go();
+        return;
+      }
+    }
+
     const rs = S._resumeState || S.metrics?._resumeState;
     if (rs) {
-      // If saved phase is 'survey' but survey already completed, skip to pre‑test
+      // If saved phase is 'survey' and survey already completed, skip appropriately
       if (rs.phase === 'survey' && S.completedPhases.survey) {
-        S.phase = 'pre';
-        S.assMode = 'pre';
-        S.assQ = 0;
-        S.assAnswers = [];
+        if (hasPre2) {
+          S.phase = 'pre';
+          S.assMode = 'pre';
+          S.assQ = 0;
+          S.assAnswers = [];
+        } else if (hasPost2) {
+          S.phase = 'post';
+          S.assMode = 'post';
+          S.assQ = 0;
+          S.assAnswers = [];
+        } else {
+          S.phase = 'complete';
+        }
       } else {
         S.phase = rs.phase || 'survey';
         S.puzzleIdx = rs.puzzleIdx || 0;
@@ -589,31 +611,38 @@ function bindResume() {
           return;
         }
       }
-      if (S.completedPhases.pretest && !S.completedPhases.puzzles) { S.phase='study'; S.puzzleIdx=S.puzzlesCompletedCount; go(); return; }
-      if (S.completedPhases.survey && !S.completedPhases.pretest) { S.phase='pre'; S.assMode='pre'; S.assQ=S.assAnswers.length; go(); return; }
-    }
-    
-    // NEW: If we are in reflect or code phase for a puzzle that is already completed, skip to next puzzle/review
-    if ((S.phase === 'reflect' || S.phase === 'code') && S.studyConfig && S.puzzleIdx !== undefined) {
-      const currentPuzzle = S.studyConfig.puzzles[S.puzzleIdx];
-      if (currentPuzzle && S.metrics?.puzzles?.[currentPuzzle.id]?.completed) {
-        // Move to next puzzle or review
-        if (S.puzzleIdx < S.studyConfig.puzzles.length - 1) {
-          S.puzzleIdx++;
-          S.phase = 'study';
-          saveLocalProgress();
+      if (S.completedPhases.pretest && !S.completedPhases.puzzles) {
+        S.phase='study';
+        S.puzzleIdx=S.puzzlesCompletedCount;
+        go();
+        return;
+      }
+      if (S.completedPhases.survey && !S.completedPhases.pretest) {
+        // Only go to pre-test if pre-test exists
+        if (hasPre2) {
+          S.phase = 'pre';
+          S.assMode = 'pre';
+          S.assQ = S.assAnswers.length;
         } else {
-          // All puzzles completed, go to review
-          initReviewDynamic();
+          // If no pre-test, go to post-test if exists, else complete
+          if (hasPost2) {
+            S.phase = 'post';
+            S.assMode = 'post';
+            S.assQ = 0;
+            S.assAnswers = [];
+          } else {
+            S.phase = 'complete';
+          }
         }
         go();
         return;
       }
+      // If we reach here, default to orient (should not happen for survey-only)
+      S.phase = 'orient';
     }
-    
     go();
   });
-  
+
   restartBtn?.addEventListener('click', () => {
     if(confirm('Erase all progress?')){
       localStorage.removeItem(getStorageKey());
@@ -629,40 +658,152 @@ function bindResume() {
     }
   });
 }
+// ============================================================
+// REGISTRATION (global)
+// ============================================================
+function renderRegister() {
+  return `${topbarHTML()}<div class="main-card">
+    <h2>Register as a research participant</h2>
+    <p>Please provide your details. You will then be able to choose from available studies.</p>
+    <div class="input-row">
+      <div><label>Full name *</label><input id="inpName" placeholder="e.g. Amina Bello" /></div>
+      <div><label>Student ID / Matric number *</label><input id="inpMatric" placeholder="NDCS/024/2002" /></div>
+      <div><label>Email address *</label><input id="inpEmail" type="email" placeholder="a.bello@student.edu" /></div>
+      <div><label>Gender</label><select id="inpGender"><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="non-binary">Non-binary</option><option value="other">Other</option></select></div>
+      <div><label>Academic session (e.g., 2025/2026)</label><input id="inpSession" placeholder="2025/2026" /></div>
+      <div><label>Class section</label><input id="inpSection" placeholder="A/B/C" /></div>
+    </div>
+    <p id="regErr" style="color:var(--danger);text-align:center"></p>
+    <div class="actions"><button class="btn btn-primary" id="btnRegisterSubmit">Continue to study selection →</button></div>
+  </div>`;
+}
+
+function bindRegister() {
+  const submitBtn = document.getElementById('btnRegisterSubmit');
+  const errEl = document.getElementById('regErr');
+  submitBtn?.addEventListener('click', async () => {
+    const name = document.getElementById('inpName')?.value.trim();
+    const matric = document.getElementById('inpMatric')?.value.trim();
+    const email = document.getElementById('inpEmail')?.value.trim();
+    const gender = document.getElementById('inpGender')?.value;
+    if (!name || !matric) {
+      if (errEl) errEl.innerText = 'Name and Matric number required';
+      return;
+    }
+    if (!email || !email.includes('@')) {
+      if (errEl) errEl.innerText = 'Valid email address required';
+      return;
+    }
+    S.participantName = name;
+    S.participantMatric = matric;
+    S.participantEmail = email;
+    S.participantGender = gender;
+    const academicSession = document.getElementById('inpSession')?.value.trim() || '';
+    const classSection = document.getElementById('inpSection')?.value.trim() || '';
+    S.availableStudies = await apiFetchStudies();
+    if (!S.availableStudies.length) {
+      if (errEl) errEl.innerText = 'No open studies at this time.';
+      return;
+    }
+    try {
+      // Step 1: Create participant with temporary enrolment
+      const tempEnrol = await apiEnrol(name, matric, 'en', S.availableStudies[0].id, { gender }, false, academicSession, classSection, '', email, gender);
+      S.participantCode = tempEnrol.participantCode;
+
+      // Step 2: Withdraw the temporary enrolment
+      try {
+        await apiWithdraw(tempEnrol.enrolmentId);
+        console.log('Temporary enrolment withdrawn:', tempEnrol.enrolmentId);
+      } catch (withdrawErr) {
+        // If the error is that the enrolment is already withdrawn, ignore it.
+        if (withdrawErr.message && withdrawErr.message.includes('Cannot withdraw completed or already withdrawn enrolment')) {
+          console.log('Enrolment already withdrawn, skipping withdrawal');
+        } else {
+          throw withdrawErr;
+        }
+      }
+
+      // Step 3: Fetch fresh enrolments
+      S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
+      console.log('Enrolments after withdrawal:', S.myEnrolments);
+
+      // Step 4: Clear any study-specific state
+      S.currentEnrolmentId = null;
+      S.currentStudyId = null;
+      S.studyConfig = null;
+      S.metrics = null;
+      S.surveyAnswers = {};
+      S.assAnswers = [];
+
+      S.phase = 'studySelect';
+      go();
+    } catch (e) {
+      console.error('Registration error:', e);
+      if (errEl) errEl.innerText = e.message || 'Registration failed. Please try again.';
+    }
+  });
+}
 function renderStudySelect() {
-  const ongoing = S.myEnrolments.filter(e => e.status !== 'completed');
+  // Filter only active enrolments (not withdrawn)
+  const ongoing = S.myEnrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
   let followupHtml = '';
   const mainStudy = S.myEnrolments.find(e => e.status === 'completed');
   if (mainStudy && S.metrics && S.metrics.mainCompletedAt && !S.metrics.followupCompleted && isFollowupAvailable()) {
     followupHtml = `<div class="example-box" style="margin-top:20px;background:#e0f2fe;border-color:#7dd3fc"><strong>📋 Follow‑up post‑test available!</strong> The waiting period has passed. You can now take the delayed post‑test.<div class="actions" style="margin-top:10px"><button class="btn btn-primary" id="btnStartFollowup">Start follow‑up →</button></div></div>`;
   }
-  return `${topbarHTML()}<div class="main-card"><h2>Select a study</h2><p>You can participate in multiple studies. Choose one below.</p><div class="card-grid">${S.availableStudies.map(study => `<button class="card study-card" data-study-id="${study.id}"><span class="card-emoji">📘</span><div class="card-label"><strong>${study.title_en}</strong><div class="card-why">${study.description_en || ''}</div></div></button>`).join('')}</div>${ongoing.length ? `<div class="example-box" style="margin-top:20px"><strong>Your ongoing studies:</strong><ul>${ongoing.map(e => `<li>${e.study.title_en} – ${e.status === 'in_progress' ? 'In progress' : 'Enrolled'}</li>`).join('')}</ul><button class="btn btn-secondary btn-sm" id="btnResumeAny">Resume a study →</button></div>` : ''}${followupHtml}</div>`;
+  return `${topbarHTML()}<div class="main-card"><h2>Available Studies</h2>
+    <p>Select a study to begin. You can participate in multiple studies.</p>
+    <div class="card-grid">
+      ${S.availableStudies.map(study => `
+        <button class="card study-card" data-study-id="${study.id}">
+          <span class="card-emoji">📘</span>
+          <div class="card-label">
+            <strong>${study.title_en}</strong>
+            <div class="card-why">${study.description_en || ''}</div>
+          </div>
+        </button>
+      `).join('')}
+    </div>
+    ${ongoing.length ? `
+      <div class="example-box" style="margin-top:20px">
+        <strong>Your ongoing studies:</strong>
+        <ul>${ongoing.map(e => `<li>${e.study.title_en} – ${e.status === 'in_progress' ? 'In progress' : 'Enrolled'}</li>`).join('')}</ul>
+        <button class="btn btn-secondary btn-sm" id="btnResumeAny">Resume a study →</button>
+      </div>
+    ` : ''}
+    ${followupHtml}
+  </div>`;
 }
+
 function bindStudySelect() {
+  // Attach click handlers to study cards
   document.querySelectorAll('.card[data-study-id]').forEach(card => {
     card.onclick = () => onSelectStudy(parseInt(card.dataset.studyId));
   });
+
+  // "Resume a study" button – only for active enrolments
   const resumeBtn = el('btnResumeAny');
   if (resumeBtn) {
     resumeBtn.addEventListener('click', () => {
-      const ongoing = S.myEnrolments.filter(e => e.status !== 'completed');
+      const ongoing = S.myEnrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
       if (ongoing.length) {
-        const study = ongoing[0];
-        if (S.completedPhases.puzzles && !S.completedPhases.posttest && S.studyConfig?.min_days_between_pretest_posttest > 0) {
-          const preDate = new Date(S.metrics.preCompletedAt);
-          const now = new Date();
-          const daysSincePre = (now - preDate) / (1000 * 60 * 60 * 24);
-          const minDays = S.studyConfig.min_days_between_pretest_posttest;
-          if (daysSincePre < minDays) {
-            const daysLeft = Math.ceil(minDays - daysSincePre);
-            alert(`You have completed the main study. The post‑test will be available in ${daysLeft} day(s). Please return then.`);
-            return;
-          }
+        // If there is only one ongoing study, resume directly
+        if (ongoing.length === 1) {
+          onSelectStudy(ongoing[0].study_id);
+          return;
         }
+        // If multiple, show selection (you can also use the resume selection screen)
+        // For simplicity, we'll just take the first one; but you could implement a selection dialog.
+        // However, we already have a resumeSelect screen; we could route to it.
+        // For now, just take the first one:
         onSelectStudy(ongoing[0].study_id);
+      } else {
+        alert('No ongoing studies to resume.');
       }
     });
   }
+
+  // Follow‑up post‑test button (if any)
   el('btnStartFollowup')?.addEventListener('click', () => {
     S.assMode = 'post';
     S.assQ = 0;
@@ -671,54 +812,170 @@ function bindStudySelect() {
     go();
   });
 }
+function renderResumeSelect() {
+  if (!S.resumeCandidates || S.resumeCandidates.length === 0) {
+    return `${topbarHTML()}<div class="main-card">
+      <h2>Resume Study</h2>
+      <p>No incomplete studies found.</p>
+      <div class="actions"><button class="btn btn-secondary" id="btnBackToHero">← Back</button></div>
+    </div>`;
+  }
+  return `${topbarHTML()}<div class="main-card">
+    <h2>Resume a Study</h2>
+    <p>You have multiple studies in progress. Select one to continue.</p>
+    <div class="card-grid">
+      ${S.resumeCandidates.map(enrol => `
+        <button class="card study-card" data-enrolment-id="${enrol.id}" data-study-id="${enrol.study_id}">
+          <span class="card-emoji">📘</span>
+          <div class="card-label">
+            <strong>${enrol.study?.title_en || 'Unknown Study'}</strong>
+            <div class="card-why">${enrol.status === 'in_progress' ? '🔄 In progress' : '📌 Enrolled'}</div>
+          </div>
+        </button>
+      `).join('')}
+    </div>
+    <div class="actions"><button class="btn btn-secondary" id="btnBackToHero">← Back</button></div>
+  </div>`;
+}
+
+function bindResumeSelect() {
+  document.querySelectorAll('.card[data-study-id]').forEach(card => {
+    card.onclick = async () => {
+      const studyId = parseInt(card.dataset.studyId);
+      const enrolmentId = parseInt(card.dataset.enrolmentId);
+      // Find the enrolment data
+      const enrol = S.resumeCandidates.find(e => e.id === enrolmentId);
+      if (!enrol) return;
+      try {
+        const config = await apiFetchStudyConfig(studyId);
+        if (!config || !config.puzzles) throw new Error('Study configuration missing');
+        S.currentEnrolmentId = enrolmentId;
+        S.currentStudyId = studyId;
+        S.studyConfig = config;
+        S.totalPuzzles = config.puzzles.length;
+        // Load progress
+        const local = loadLocalProgress();
+        if (local) Object.assign(S, local);
+        else {
+          const remote = await apiLoadProgress(enrolmentId);
+          if (remote?.progress) Object.assign(S, remote.progress);
+        }
+        S.phase = 'resume';
+        go();
+      } catch (e) { alert(e.message); }
+    };
+  });
+  el('btnBackToHero')?.addEventListener('click', () => {
+    S.phase = 'hero';
+    S.resumeCandidates = [];
+    go();
+  });
+}
+
 async function onSelectStudy(studyId) {
   try {
-    const existingEnrol = S.myEnrolments.find(e => e.study_id === studyId);
-    if (existingEnrol && (existingEnrol.status === 'completed' || S.completedPhases.puzzles) && !S.completedPhases.posttest) {
-      const minDays = S.studyConfig?.min_days_between_pretest_posttest || 0;
-      if (minDays > 0 && S.metrics?.preCompletedAt) {
-        const preDate = new Date(S.metrics.preCompletedAt);
-        const now = new Date();
-        const daysSincePre = (now - preDate) / (1000 * 60 * 60 * 24);
-        if (daysSincePre < minDays) {
-          const daysLeft = Math.ceil(minDays - daysSincePre);
-          alert(`You have already completed the main study. The post‑test will be available in ${daysLeft} day(s). Please return then.`);
-          return;
+    console.log('=== onSelectStudy called ===');
+    console.log('studyId:', studyId);
+    console.log('S.participantName:', S.participantName);
+    console.log('S.participantMatric:', S.participantMatric);
+    console.log('S.participantCode:', S.participantCode);
+
+    // ----- SAFETY NET: ensure participant details are present -----
+    if (!S.participantName || !S.participantMatric) {
+      console.log('Participant details missing, attempting to fetch...');
+      if (S.participantCode) {
+        const enrolments = await apiGetMyEnrolments(S.participantCode);
+        if (enrolments.length > 0) {
+          const p = enrolments[0].participant || {};
+          S.participantName = p.name || 'Participant';
+          S.participantMatric = p.matric || '';
+          S.participantEmail = p.email || '';
+          S.participantGender = p.gender || '';
+          console.log('Fetched participant details:', S.participantName, S.participantMatric);
         } else {
-          S.phase = 'post';
-          S.assMode = 'post';
-          S.assQ = 0;
-          S.assAnswers = [];
+          console.warn('No enrolments found for code, redirecting to registration');
+          alert('Please register first.');
+          S.phase = 'register';
           go();
           return;
         }
+      } else {
+        console.warn('No participant code, redirecting to registration');
+        alert('Please register first.');
+        S.phase = 'register';
+        go();
+        return;
       }
     }
+
     const config = await apiFetchStudyConfig(studyId);
-    if(!config || !config.puzzles) throw new Error('Study configuration missing');
+    if (!config || !config.puzzles) throw new Error('Study configuration missing');
+
     S.studyConfig = config;
     S.studyLang = 'en';
     S.totalPuzzles = config.puzzles.length;
+
     let enrolment = S.myEnrolments.find(e => e.study_id === studyId);
-    if(enrolment) {
+
+    // Preserve participant details
+    const participantName = S.participantName;
+    const participantMatric = S.participantMatric;
+    const participantEmail = S.participantEmail;
+    const participantGender = S.participantGender;
+
+    // If enrolment is withdrawn, ignore it and treat as new
+    if (enrolment && enrolment.status === 'withdrawn') {
+      console.log('Found withdrawn enrolment, treating as non-existent:', enrolment.id);
+      S.myEnrolments = S.myEnrolments.filter(e => e.id !== enrolment.id);
+      enrolment = null;
+      // Refresh enrolments from server to stay in sync
+      S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
+    }
+
+    if (enrolment) {
+      // Existing active enrolment – load progress
       S.currentEnrolmentId = enrolment.id;
-      const local = loadLocalProgress();
-      if(local) { Object.assign(S, local); S.studyConfig = config; }
-      else { const remote = await apiLoadProgress(enrolment.id); if(remote?.progress) Object.assign(S, remote.progress); }
       S.currentStudyId = studyId;
       S.randomisationGroup = enrolment.randomisation_group;
-      S.phase = 'orient';
-      resetTimeoutTimer();
-    } else {
-      const enrolRes = await apiEnrol(S.participantName, S.participantMatric, 'en', studyId, { gender: S.participantGender }, S.consentGeneral, '', '', '', S.participantEmail, S.participantGender);
-      S.currentEnrolmentId = enrolRes.enrolmentId;
-      S.currentStudyId = studyId;
-      S.randomisationGroup = enrolRes.randomisationGroup;
-      S.myEnrolments.push({ id: enrolRes.enrolmentId, study_id: studyId, status: 'enrolled', study: { title_en: S.availableStudies.find(s=>s.id===studyId).title_en }, randomisation_group: S.randomisationGroup });
+
+      let local = loadLocalProgress();
+      if (local) {
+        Object.assign(S, local);
+        S.participantName = participantName;
+        S.participantMatric = participantMatric;
+        S.participantEmail = participantEmail;
+        S.participantGender = participantGender;
+        S.studyConfig = config;
+        S.currentStudyId = studyId;
+        S.currentEnrolmentId = enrolment.id;
+        S.randomisationGroup = enrolment.randomisation_group;
+        S.phase = 'resume';
+        go();
+        return;
+      }
+
+      const remote = await apiLoadProgress(enrolment.id);
+      if (remote && remote.progress) {
+        Object.assign(S, remote.progress);
+        S.participantName = participantName;
+        S.participantMatric = participantMatric;
+        S.participantEmail = participantEmail;
+        S.participantGender = participantGender;
+        S.studyConfig = config;
+        S.currentStudyId = studyId;
+        S.currentEnrolmentId = enrolment.id;
+        S.randomisationGroup = enrolment.randomisation_group;
+        S.phase = 'resume';
+        go();
+        return;
+      }
+
+      // No progress – start fresh
       S.metrics = { startedAt: Date.now(), puzzles: {} };
       S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false };
       S.puzzlesCompletedCount = 0;
       S.postTestPending = false;
+      S.gradeConsent = false;
       S.surveyAnswers = {};
       S.assAnswers = [];
       S.assQ = 0;
@@ -729,12 +986,66 @@ async function onSelectStudy(studyId) {
       S.fadedLocked = [];
       S.reviewQueue = [];
       S.reviewIdx = 0;
+      S.studyConfig = config;
+      S.currentStudyId = studyId;
+      S.currentEnrolmentId = enrolment.id;
+      S.randomisationGroup = enrolment.randomisation_group;
+      S.participantName = participantName;
+      S.participantMatric = participantMatric;
+      S.participantEmail = participantEmail;
+      S.participantGender = participantGender;
       saveLocalProgress();
       S.phase = 'orient';
       resetTimeoutTimer();
+      go();
+    } else {
+      // New enrolment – create it
+      console.log('Creating new enrolment for study:', studyId);
+      console.log('Using name:', participantName, 'matric:', participantMatric);
+      const enrolRes = await apiEnrol(
+        participantName, participantMatric, 'en', studyId,
+        { gender: participantGender }, false, '', '', '',
+        participantEmail, participantGender
+      );
+      S.currentEnrolmentId = enrolRes.enrolmentId;
+      S.currentStudyId = studyId;
+      S.randomisationGroup = enrolRes.randomisationGroup;
+      S.myEnrolments.push({
+        id: enrolRes.enrolmentId,
+        study_id: studyId,
+        status: 'enrolled',
+        study: { title_en: S.availableStudies.find(s => s.id === studyId).title_en },
+        randomisation_group: S.randomisationGroup
+      });
+      S.metrics = { startedAt: Date.now(), puzzles: {} };
+      S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false };
+      S.puzzlesCompletedCount = 0;
+      S.postTestPending = false;
+      S.gradeConsent = false;
+      S.surveyAnswers = {};
+      S.assAnswers = [];
+      S.assQ = 0;
+      S.assMode = 'pre';
+      S.puzzleIdx = 0;
+      S.available = [];
+      S.userSeq = [];
+      S.fadedLocked = [];
+      S.reviewQueue = [];
+      S.reviewIdx = 0;
+      S.studyConfig = config;
+      S.participantName = participantName;
+      S.participantMatric = participantMatric;
+      S.participantEmail = participantEmail;
+      S.participantGender = participantGender;
+      saveLocalProgress();
+      S.phase = 'orient';
+      resetTimeoutTimer();
+      go();
     }
-    go();
-  } catch(e) { alert(e.message); }
+  } catch (e) {
+    console.error('onSelectStudy error:', e);
+    alert(e.message);
+  }
 }
 function renderOrient() {
   const steps = [
@@ -748,8 +1059,9 @@ function renderOrient() {
 }
 function bindOrient() { el('btnOrientNext')?.addEventListener('click',()=>{ S.phase='consent'; go(); }); }
 function renderConsent() {
+  const requiresGrade = S.studyConfig?.requiresGradeConsent === true;
   return `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
-    <h2>📜 Informed Consent</h2>
+    <h2>📜 Informed Consent & Permission</h2>
     <div class="consent-box">
       <h4>Study title</h4><p>${S.studyConfig.title_en}</p>
       <h4>Purpose</h4><p>${S.studyConfig.description_en}</p>
@@ -757,12 +1069,29 @@ function renderConsent() {
       <h4>Data and privacy</h4><p>Data is stored securely. All published results are anonymised.</p>
       <h4>Ethics reference: ${ETHICS_REF}</h4>
     </div>
-    <div style="margin: 24px 0; padding: 12px; background: var(--gray-50); border-radius: 16px;">
-      <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
-        <input type="checkbox" id="consentChk" style="width: 20px; height: 20px; margin: 0;" />
-        <span style="font-weight: 500;">I voluntarily agree to participate in this research study.</span>
-      </label>
+
+    <div style="margin: 24px 0; padding: 16px; background: var(--gray-50); border-radius: 16px;">
+      <p style="font-weight:600; margin-bottom:12px;">Please indicate your choices below:</p>
+
+      <div style="margin-bottom:16px;">
+        <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+          <input type="checkbox" id="consentChk" style="width: 20px; height: 20px; margin: 0;" />
+          <span><strong>1. Consent to use my data in the study.</strong><br>
+          <span style="font-size:0.9rem; color:var(--muted);">I voluntarily agree to participate.</span></span>
+        </label>
+      </div>
+
+      ${requiresGrade ? `
+      <div>
+        <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+          <input type="checkbox" id="gradeConsentChk" style="width: 20px; height: 20px; margin: 0;" />
+          <span><strong>2. Permission to access my final grade for the course I will name later.</strong><br>
+          <span style="font-size:0.9rem; color:var(--muted);">I give permission for the research team to access my grade in the course I specify in the survey.</span></span>
+        </label>
+      </div>
+      ` : ''}
     </div>
+
     <div class="actions">
       <button class="btn btn-secondary" id="btnConsentBack">← Back</button>
       <button class="btn btn-primary" id="btnConsentNext" disabled>I consent →</button>
@@ -771,78 +1100,244 @@ function renderConsent() {
 }
 function bindConsent() {
   const chk = document.getElementById('consentChk');
+  const gradeChk = document.getElementById('gradeConsentChk');
   const nextBtn = document.getElementById('btnConsentNext');
   const backBtn = document.getElementById('btnConsentBack');
+
   if (!chk || !nextBtn) return;
-  const updateNext = () => { nextBtn.disabled = !chk.checked; };
+
+  const requiresGrade = S.studyConfig?.requiresGradeConsent === true;
+
+  const updateNext = () => {
+    if (requiresGrade) {
+      if (!gradeChk) return;
+      nextBtn.disabled = !(chk.checked && gradeChk.checked);
+    } else {
+      nextBtn.disabled = !chk.checked;
+    }
+  };
+
   chk.addEventListener('change', updateNext);
+  if (requiresGrade && gradeChk) {
+    gradeChk.addEventListener('change', updateNext);
+  }
   updateNext();
-  backBtn?.addEventListener('click', () => { S.phase = 'orient'; go(); });
+
+  backBtn?.addEventListener('click', () => {
+    S.phase = 'orient';
+    go();
+  });
+
   nextBtn.addEventListener('click', () => {
-    if (!chk.checked) { alert('Please check the consent box to continue.'); return; }
+    if (!chk.checked) {
+      alert('Please check the consent box to continue.');
+      return;
+    }
+    if (requiresGrade && (!gradeChk || !gradeChk.checked)) {
+      alert('Please check both boxes to continue.');
+      return;
+    }
     S.consentGeneral = true;
+    S.gradeConsent = requiresGrade ? true : false;
     if (!S.surveyAnswers || Object.keys(S.surveyAnswers).length === 0) {
       S.surveyAnswers = {};
     }
+    saveLocalProgress();
     S.phase = 'survey';
     go();
   });
 }
 function renderSurveyDynamic() {
   const fields = S.studyConfig.surveyFields || [];
-  let html = `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><h2>📋 Background Survey</h2>`;
+  const surveyTitle = S.studyConfig.title_en || 'Survey';
+  let html = `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><h2>📋 ${surveyTitle}</h2>`;
+  
   fields.forEach(f => {
+    if (f.type === 'section') {
+      html += `<div class="survey-section">
+        <h3>${f.label_en}</h3>
+        ${f.instructions ? `<p>${f.instructions}</p>` : ''}
+        ${f.scaleLabels ? `<p class="scale-labels">${f.scaleLabels}</p>` : ''}
+      </div>`;
+      return;
+    }
     if (f.id === 'programme') return;
-    if(f.type === 'select') {
+    if (f.type === 'select') {
       const label = L(f, 'label');
       let opts = L(f, 'options');
-      if (f.id === 'level') {
+      
+      if (f.id === 'level' || f.id === 'demographics_level') {
         const progType = getProgrammeType(S.participantMatric);
-        if (S.studyConfig?.bilingual === true && S.studyLang === 'ha') {
-          if (progType === 'nd') opts = ['ND Shekara 1','ND Shekara 2'];
-          else if (progType === 'hnd') opts = ['HND Shekara 1','HND Shekara 2'];
-          else opts = ['Shekara 1','Shekara 2','Shekara 3','Shekara 4'];
+        if (f.id === 'demographics_level') {
+          if (progType === 'nd') opts = ['ND1', 'ND2'];
+          else if (progType === 'hnd') opts = ['HND1', 'HND2'];
+          else opts = ['100 level', '200 level', '300 level', '400 level', '500 level / PG', 'Other'];
         } else {
-          if (progType === 'nd') opts = ['ND Year 1','ND Year 2'];
-          else if (progType === 'hnd') opts = ['HND Year 1','HND Year 2'];
-          else opts = ['Year 1','Year 2','Year 3','Year 4'];
+          if (S.studyConfig?.bilingual === true && S.studyLang === 'ha') {
+            if (progType === 'nd') opts = ['ND Shekara 1','ND Shekara 2'];
+            else if (progType === 'hnd') opts = ['HND Shekara 1','HND Shekara 2'];
+            else opts = ['Shekara 1','Shekara 2','Shekara 3','Shekara 4'];
+          } else {
+            if (progType === 'nd') opts = ['ND Year 1','ND Year 2'];
+            else if (progType === 'hnd') opts = ['HND Year 1','HND Year 2'];
+            else opts = ['Year 1','Year 2','Year 3','Year 4'];
+          }
         }
       }
+      
       html += `<div class="field-row"><label>${label}</label><select data-field="${f.id}" class="sv-sel"><option value="">— select —</option>${opts.map((o,i)=>`<option value="${i}">${o}</option>`).join('')}</select></div>`;
-    } else if(f.type === 'likert') {
+    } else if (f.type === 'likert') {
       const label = L(f, 'label');
-      const likert = (S.studyConfig?.bilingual === true && S.studyLang === 'ha') ? ['Ƙi ƙwarai','Ƙi','A tsakiya','Yarda','Yarda ƙwarai'] : ['Strongly Disagree','Disagree','Neutral','Agree','Strongly Agree'];
-      html += `<div class="likert-row"><div class="lq">${label}</div><div class="likert-scale">${[1,2,3,4,5].map(n=>`<div class="lk-opt"><input type="radio" name="${f.id}" id="${f.id}_${n}" value="${n}" data-field="${f.id}" class="sv-lk"><label for="${f.id}_${n}"><span class="lk-num">${n}</span><span>${likert[n-1].split(' ')[0]}</span></label></div>`).join('')}</div></div>`;
+      let options = L(f, 'options');
+      if (!options || options.length === 0) {
+        options = ['1', '2', '3', '4', '5'];
+        console.warn(`Likert field "${f.id}" had no options; using default 1-5.`);
+      }
+      html += `<div class="likert-row"><div class="lq">${label}</div><div class="likert-scale">`;
+      options.forEach((opt, idx) => {
+        const val = idx + 1;
+        html += `<div class="lk-opt">
+          <input type="radio" name="${f.id}" id="${f.id}_${val}" value="${val}" data-field="${f.id}" class="sv-lk">
+          <label for="${f.id}_${val}"><span class="lk-num">${val}</span><span>${opt}</span></label>
+        </div>`;
+      });
+      html += `</div></div>`;
+    } else if (f.type === 'text') {
+      // Open-ended text field
+      const label = L(f, 'label');
+      const placeholder = L(f, 'placeholder') || 'Write your answer here…';
+      html += `<div class="field-row" style="margin-bottom:20px;">
+        <label style="display:block; font-weight:600; margin-bottom:6px;">${label}</label>
+        <textarea data-field="${f.id}" class="sv-text" placeholder="${placeholder}" style="width:100%; padding:10px; border-radius:12px; border:1.5px solid var(--border); min-height:80px; font-family:inherit; resize:vertical;"></textarea>
+      </div>`;
     }
   });
-  html += `<div class="actions"><button class="btn btn-primary" id="btnSurveyNext" disabled>Continue to pre‑test →</button></div><p id="surveyMsg" style="color:var(--danger);text-align:center"></p></div>`;
+  
+  const hasPre = S.studyConfig.preQ && S.studyConfig.preQ.length > 0;
+  const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
+  const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
+  let btnLabel = 'Continue →';
+  if (!hasPre && !hasPost && !hasPuzzles) btnLabel = 'Submit Survey';
+  else if (hasPre) btnLabel = 'Continue to pre‑test →';
+  else if (hasPost) btnLabel = 'Continue to post‑test →';
+  else if (hasPuzzles) btnLabel = 'Continue to study →';
+  
+  html += `<div class="actions"><button class="btn btn-primary" id="btnSurveyNext" disabled>${btnLabel}</button></div>
+    <p id="surveyMsg" style="color:var(--danger);text-align:center"></p></div>`;
   return html;
 }
 function bindSurveyDynamic() {
   const fields = S.studyConfig.surveyFields || [];
   const btn = el('btnSurveyNext');
   if (btn) btn.disabled = true;
+
   const updateBtn = () => {
-    const requiredFields = fields.filter(f => f.id !== 'programme');
-    const allFilled = requiredFields.every(f => { const val = S.surveyAnswers[f.id]; return val !== undefined && val !== null && val !== ''; });
+    // Read all current values from DOM
+    document.querySelectorAll('.sv-sel').forEach(sel => {
+      if (sel.value !== '') {
+        S.surveyAnswers[sel.dataset.field] = sel.value;
+      }
+    });
+    document.querySelectorAll('.sv-lk:checked').forEach(radio => {
+      S.surveyAnswers[radio.dataset.field] = parseInt(radio.value);
+    });
+    document.querySelectorAll('.sv-text').forEach(textarea => {
+      if (textarea.value.trim() !== '') {
+        S.surveyAnswers[textarea.dataset.field] = textarea.value.trim();
+      }
+    });
+
+    const requiredFields = fields.filter(f => f.id && f.id !== 'programme' && f.type !== 'section');
+    const allFilled = requiredFields.every(f => {
+      const val = S.surveyAnswers[f.id];
+      return val !== undefined && val !== null && val !== '';
+    });
+
     if (btn) btn.disabled = !allFilled;
     const msg = el('surveyMsg');
-    if (msg) msg.textContent = allFilled ? '' : (S.lang === 'en' ? 'Please answer all questions.' : 'Don Allah amsa duk tambayoyin.');
+    if (msg) {
+      msg.textContent = allFilled ? '' : (S.lang === 'en' ? 'Please answer all questions.' : 'Don Allah amsa duk tambayoyin.');
+    }
+
+    if (!allFilled) {
+      const missing = requiredFields.filter(f => {
+        const val = S.surveyAnswers[f.id];
+        return val === undefined || val === null || val === '';
+      }).map(f => f.id);
+      console.log('Missing fields:', missing);
+    }
   };
-  document.querySelectorAll('.sv-sel').forEach(sel => { sel.addEventListener('change', () => { S.surveyAnswers[sel.dataset.field] = sel.value; updateBtn(); saveLocalProgress(); }); });
-  document.querySelectorAll('.sv-lk').forEach(radio => { radio.addEventListener('change', () => { if (radio.checked) S.surveyAnswers[radio.dataset.field] = parseInt(radio.value); updateBtn(); saveLocalProgress(); }); });
+
+  // Bind select fields
+  document.querySelectorAll('.sv-sel').forEach(sel => {
+    sel.addEventListener('change', () => {
+      S.surveyAnswers[sel.dataset.field] = sel.value;
+      updateBtn();
+      saveLocalProgress();
+    });
+  });
+
+  // Bind Likert radio buttons
+  document.querySelectorAll('.sv-lk').forEach(radio => {
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        S.surveyAnswers[radio.dataset.field] = parseInt(radio.value);
+        updateBtn();
+        saveLocalProgress();
+      }
+    });
+  });
+
+  // Bind textarea fields (real‑time input)
+  document.querySelectorAll('.sv-text').forEach(textarea => {
+    textarea.addEventListener('input', () => {
+      S.surveyAnswers[textarea.dataset.field] = textarea.value.trim();
+      updateBtn();
+      saveLocalProgress();
+    });
+  });
+
   updateBtn();
+
   el('btnSurveyNext')?.addEventListener('click', () => {
-  S.completedPhases.survey = true;
-  S.inProgressPhase = 'pretest';
-  saveLocalProgress();                    // save before phase change
-  S.phase = 'pre';
-  S.assMode = 'pre';
-  S.assQ = 0;
-  S.assAnswers = [];
-  saveLocalProgress();                    // save AFTER phase change
-  go();
-});
+    // Final capture before proceeding
+    document.querySelectorAll('.sv-sel').forEach(sel => {
+      if (sel.value !== '') S.surveyAnswers[sel.dataset.field] = sel.value;
+    });
+    document.querySelectorAll('.sv-lk:checked').forEach(radio => {
+      S.surveyAnswers[radio.dataset.field] = parseInt(radio.value);
+    });
+    document.querySelectorAll('.sv-text').forEach(textarea => {
+      if (textarea.value.trim() !== '') S.surveyAnswers[textarea.dataset.field] = textarea.value.trim();
+    });
+    saveLocalProgress();
+
+    S.completedPhases.survey = true;
+    S.inProgressPhase = 'pretest';
+    saveLocalProgress();
+
+    const hasPre = S.studyConfig.preQ && S.studyConfig.preQ.length > 0;
+    const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
+    const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
+
+    if (hasPre) {
+      S.phase = 'pre';
+      S.assMode = 'pre';
+      S.assQ = 0;
+      S.assAnswers = [];
+    } else if (hasPost) {
+      S.phase = 'post';
+      S.assMode = 'post';
+      S.assQ = 0;
+      S.assAnswers = [];
+    } else if (hasPuzzles) {
+      S.phase = 'study';
+      S.puzzleIdx = 0;
+    } else {
+      S.phase = 'debrief';
+    }
+    go();
+  });
 }
 function renderAssessmentDynamic(mode) {
   if (mode === 'post' && !canStartPostTest()) {
@@ -1117,24 +1612,64 @@ function renderGuided() {
 }
 function bindGuided() { el('btnGuidedNext')?.addEventListener('click',()=>{ S.phase='reflect'; go(); }); }
 function renderDebrief() {
+  const hasPre = S.studyConfig.preQ && S.studyConfig.preQ.length > 0;
+  const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
+  const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
+  // If this is a survey-only study (no tests/puzzles)
+  if (!hasPre && !hasPost && !hasPuzzles) {
+    return `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
+      <div style="text-align:center; padding:20px 0;">
+        <div style="font-size:4rem;">✅</div>
+        <h2>Survey Submitted</h2>
+        <p style="font-size:1.1rem; margin:16px 0;">Thank you for completing the survey. Your responses have been recorded.</p>
+        <p style="color:var(--muted);">You may now view your participation certificate or return to the study selection page.</p>
+        <div class="actions" style="justify-content:center; margin-top:24px;">
+          <button class="btn btn-secondary" id="btnDebriefBack">📚 Back to Studies</button>
+          <button class="btn btn-primary" id="btnDebriefNext">🎓 View Certificate</button>
+        </div>
+      </div>
+    </div>`;
+  }
+  // Otherwise, show learning gain (original behaviour)
   const gain = (S.metrics?.postScore && S.metrics?.preScore) ? S.metrics.postScore - S.metrics.preScore : null;
   return `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><div class="cert-box"><div class="pcode-num">${S.participantCode}</div>${gain!==null?`<p>Learning gain: ${gain>=0?'+':''}${gain}%</p>`:''}</div><div class="actions"><button class="btn btn-primary" id="btnDebriefNext">View results →</button></div></div>`;
 }
-function bindDebrief() { el('btnDebriefNext')?.addEventListener('click',()=>{ S.phase='complete'; go(); }); }
 async function renderComplete() {
-  if (S.postTestPending && S.studyConfig?.min_days_between_pretest_posttest > 0) {
+  // If this is a survey-only study (no puzzles), show a simpler completion page
+  const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
+  if (!hasPuzzles && S.completedPhases.survey && !S.completedPhases.puzzles) {
+    return `${topbarHTML()}<div class="main-card">
+      <div style="text-align:center; padding:20px 0;">
+        <div style="font-size:4rem;">🎓</div>
+        <h2>Participation Complete</h2>
+        <p>Thank you for your participation in this study.</p>
+        <p style="color:var(--muted);">You can download your certificate below.</p>
+        <div class="actions" style="justify-content:center; margin-top:24px;">
+          <button class="btn btn-primary" id="btnDownloadCertPDF">📄 Download Certificate (PDF)</button>
+          <button class="btn btn-secondary" id="btnPrintCert">🖨 Print certificate</button>
+          <button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // Only show post‑test waiting message if the participant actually completed all puzzles
+  if (S.postTestPending && S.completedPhases.puzzles && S.studyConfig?.min_days_between_pretest_posttest > 0) {
     const preDate = new Date(S.metrics.preCompletedAt);
     const now = new Date();
     const minDays = S.studyConfig.min_days_between_pretest_posttest;
     const daysSincePre = (now - preDate) / (1000 * 60 * 60 * 24);
     const daysLeft = Math.ceil(minDays - daysSincePre);
+    const waitingDays = isNaN(daysLeft) ? minDays : daysLeft;
     return `${topbarHTML()}<div class="main-card">
       <h2>Post‑test waiting period</h2>
-      <p>You have completed the main study. The post‑test will be available in <strong>${daysLeft} day(s)</strong>.</p>
+      <p>You have completed the main study. The post‑test will be available in <strong>${waitingDays} day(s)</strong>.</p>
       <p>You will be able to take it when you return after ${minDays} days from your pre‑test.</p>
       <div class="actions"><button class="btn btn-primary" id="btnBackToStudies">← Back to Studies</button></div>
     </div>`;
   }
+
+  // Rest of your original renderComplete code (certificate, etc.) – for puzzle-based studies
   const solved = Object.values(S.metrics?.puzzles||{}).filter(p=>p.completed).length;
   let peerHtml = '';
   if (API_BASE !== undefined && S.currentStudyId) {
@@ -1153,11 +1688,49 @@ async function renderComplete() {
   } else if (S.metrics && S.metrics.followupCompleted) { followupStatus = `<div class="example-box" style="margin-top:14px">✅ You have completed the delayed post‑test. Thank you for your participation!</div>`; }
   return `${topbarHTML()}<div class="main-card"><div class="score-hero"><div class="score-big">${solved}/${S.studyConfig.puzzles.length}</div><p>puzzles solved</p></div>${peerHtml}${followupStatus}<div class="actions"><button class="btn btn-secondary" id="btnViewDash">📊 Dashboard</button><button class="btn btn-primary" id="btnDownloadCertPDF">📄 Download Certificate (PDF)</button><button class="btn btn-secondary" id="btnPrintCert">🖨 Print certificate</button><button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button></div></div>`;
 }
+
+function bindDebrief() {
+  // "Back to Studies" button (survey-only)
+  el('btnDebriefBack')?.addEventListener('click', () => {
+    S.studyConfig = null;   // Clear old study name from topbar
+    S.phase = 'studySelect';
+    go();
+  });
+  // "View Certificate" / "View results" button
+  el('btnDebriefNext')?.addEventListener('click', () => {
+    S.phase = 'complete';
+    go();
+  });
+}
 function bindComplete() {
-  el('btnViewDash')?.addEventListener('click',()=>{ window.location.href = window.location.pathname + '?admin=true'; });
-  el('btnDownloadCertPDF')?.addEventListener('click', () => { const certHtml = generateCertificateHTML(); const blob = new Blob([certHtml], { type: 'text/html' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `certificate_${S.participantCode}.html`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); alert('Certificate HTML saved. Open it in your browser and print to PDF for a permanent copy.'); });
-  el('btnPrintCert')?.addEventListener('click', () => { const win = window.open(); win.document.write(generateCertificateHTML()); win.document.close(); win.focus(); win.print(); });
-  el('btnBackToStudies')?.addEventListener('click', () => { S.phase = 'studySelect'; go(); });
+  el('btnViewDash')?.addEventListener('click', () => {
+    window.location.href = window.location.pathname + '?admin=true';
+  });
+  el('btnDownloadCertPDF')?.addEventListener('click', () => {
+    const certHtml = generateCertificateHTML();
+    const blob = new Blob([certHtml], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `certificate_${S.participantCode}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert('Certificate HTML saved. Open it in your browser and print to PDF for a permanent copy.');
+  });
+  el('btnPrintCert')?.addEventListener('click', () => {
+    const win = window.open();
+    win.document.write(generateCertificateHTML());
+    win.document.close();
+    win.focus();
+    win.print();
+  });
+  el('btnBackToStudies')?.addEventListener('click', () => {
+    S.studyConfig = null;   // Clear old study name from topbar
+    S.phase = 'studySelect';
+    go();
+  });
 }
 function renderAdminLogin() {
   return `${topbarHTML()}<div class="main-card"><h2>🔐 Admin Login</h2><p>Please enter the admin password to access the dashboard.</p><div class="input-row" style="max-width:300px"><input type="password" id="adminPassword" placeholder="Password" /></div><div id="loginError" style="color:var(--danger);text-align:center"></div><div class="actions"><button class="btn btn-secondary" id="btnLoginCancel">Cancel</button><button class="btn btn-primary" id="btnLoginSubmit">Login</button></div></div>`;
@@ -1371,6 +1944,13 @@ async function go() {
       S.totalPuzzles = S.studyConfig.puzzles?.length || 0;
     } catch(e) { alert('Could not load study. Please try again.'); S.phase='hero'; go(); return; }
   }
+
+  // --- ADD THIS BLOCK ---
+  // Fetch open studies when on study selection page (e.g., after resume)
+  if (S.phase === 'studySelect' && S.availableStudies.length === 0) {
+    S.availableStudies = await apiFetchStudies();
+  }
+
   const needsProgress = ['pre','study','faded','attempt','reflect','code','review','post'];
   if (needsProgress.includes(S.phase)) {
     const hasRealProgress = S.completedPhases.survey || S.completedPhases.pretest || S.completedPhases.puzzles || 
@@ -1388,7 +1968,9 @@ async function go() {
   let html = '';
   switch(S.phase){
     case 'hero': html = renderHero(); break;
+    case 'register': html = renderRegister(); break;
     case 'studySelect': html = renderStudySelect(); break;
+    case 'resumeSelect': html = renderResumeSelect(); break;
     case 'orient': html = renderOrient(); break;
     case 'consent': html = renderConsent(); break;
     case 'survey': html = renderSurveyDynamic(); break;
@@ -1412,7 +1994,18 @@ async function go() {
   app.innerHTML = html;
   el('btnTheme')?.addEventListener('click',()=>{ toggleTheme(); });
   el('btnAudio')?.addEventListener('click',()=>{ S.audioOn = !S.audioOn; go(); });
-  el('btnStudySelect')?.addEventListener('click',()=>{ S.phase='studySelect'; go(); });
+  el('btnStudySelect')?.addEventListener('click', () => {
+    const safePhases = ['hero', 'register', 'studySelect', 'adminLogin', 'dashboard'];
+    if (!safePhases.includes(S.phase)) {
+      if (confirm('You are in the middle of a study activity. Going back to study selection may cause loss of unsaved progress. Are you sure?')) {
+        S.phase = 'studySelect';
+        go();
+      }
+    } else {
+      S.phase = 'studySelect';
+      go();
+    }
+  });
   el('btnLangStudy')?.addEventListener('click',()=>{ if(S.studyConfig?.bilingual) { S.studyLang = S.studyLang === 'en' ? 'ha' : 'en'; saveLocalProgress(); go(); } });
   el('btnWithdraw')?.addEventListener('click', async () => { if(confirm('Withdraw? Progress lost.')) { await apiWithdraw(S.currentEnrolmentId); localStorage.removeItem(getStorageKey()); S.phase='hero'; go(); } });
   el('btnLogoutPortal')?.addEventListener('click', () => { if(confirm('Logout?')) { S.phase='hero'; S.participantCode=null; S.participantName=''; S.participantMatric=''; S.participantEmail=''; S.participantGender=''; S.currentEnrolmentId=null; S.currentStudyId=null; S.metrics=null; S.surveyAnswers={}; S.assAnswers=[]; go(); } });
@@ -1422,7 +2015,9 @@ async function go() {
   else if (S.timeoutInterval) clearInterval(S.timeoutInterval);
   switch(S.phase){
     case 'hero': bindHero(); break;
+    case 'register': bindRegister(); break;
     case 'studySelect': bindStudySelect(); break;
+    case 'resumeSelect': bindResumeSelect(); break;
     case 'orient': bindOrient(); break;
     case 'consent': bindConsent(); break;
     case 'survey': bindSurveyDynamic(); break;

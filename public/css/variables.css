@@ -5,6 +5,9 @@
   --primary-light: #3b82f6;
   --success: #10b981;
   --danger: #ef4444;
+  --surface-1: #ffffff;
+  --surface-2: #f8fafc;
+  --surface-3: #eef2f7;
   --warning: #f59e0b;
   --gray-50: #f9fafb;
   --gray-100: #f3f4f6;
@@ -40,6 +43,9 @@
   --success: #34d399;
   --danger: #f87171;
   --warning: #fbbf24;
+  --surface-1: #1e293b;
+  --surface-2: #162033;
+  --surface-3: #0f172a;
   --gray-50: #0f172a;
   --gray-100: #1e293b;
   --gray-200: #334155;

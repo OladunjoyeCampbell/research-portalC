@@ -195,10 +195,18 @@ app.get('/api/studies/:id/config', async (req, res) => {
 
 app.post('/api/enrol', async (req, res) => {
   const { name, matric, lang, studyId, demographics, consentGeneral, academicSession, classSection, lecturerId, email, gender } = req.body;
-  if (!name || !matric || !studyId) return res.status(400).json({ error: 'name, matric, studyId required' });
+  if (!name || !matric || !studyId) {
+    return res.status(400).json({ error: 'name, matric, studyId required' });
+  }
 
+  // Find or create participant
   let participant;
-  const { data: existing } = await sb.from('participants').select('*').ilike('matric', matric.trim().toUpperCase()).maybeSingle();
+  const { data: existing } = await sb
+    .from('participants')
+    .select('*')
+    .ilike('matric', matric.trim().toUpperCase())
+    .maybeSingle();
+
   if (existing) {
     participant = existing;
     const updates = {};
@@ -214,42 +222,123 @@ app.post('/api/enrol', async (req, res) => {
   } else {
     const code = generateParticipantCode();
     const { data: newPart, error } = await sb.from('participants').insert({
-      participant_code: code, name: name.trim(), matric: matric.trim().toUpperCase(),
-      lang: lang || 'en', demographics: demographics || {}, consent_general: consentGeneral || false,
-      academic_session: academicSession, class_section: classSection, lecturer_id: lecturerId,
-      email: email || null, gender: gender || null
+      participant_code: code,
+      name: name.trim(),
+      matric: matric.trim().toUpperCase(),
+      lang: lang || 'en',
+      demographics: demographics || {},
+      consent_general: consentGeneral || false,
+      academic_session: academicSession,
+      class_section: classSection,
+      lecturer_id: lecturerId,
+      email: email || null,
+      gender: gender || null
     }).select().single();
     if (error) return res.status(500).json({ error: error.message });
     participant = newPart;
   }
 
-  const { data: study } = await sb.from('studies').select('status, capacity, end_date, delayed_post_test_weeks, config').eq('id', studyId).single();
+  // Check study availability
+  const { data: study } = await sb
+    .from('studies')
+    .select('status, capacity, end_date, delayed_post_test_weeks, config')
+    .eq('id', studyId)
+    .single();
   if (!study) return res.status(404).json({ error: 'Study not found' });
   if (study.status !== 'open') return res.status(403).json({ error: 'Study is not open for enrolment' });
-  if (study.end_date && new Date(study.end_date) < new Date()) return res.status(403).json({ error: 'Study enrolment period has expired' });
+  if (study.end_date && new Date(study.end_date) < new Date()) {
+    return res.status(403).json({ error: 'Study enrolment period has expired' });
+  }
 
-  const { count: enrolled } = await sb.from('enrolments').select('*', { count: 'exact', head: true }).eq('study_id', studyId);
+  const { count: enrolled } = await sb
+    .from('enrolments')
+    .select('*', { count: 'exact', head: true })
+    .eq('study_id', studyId);
   if (enrolled >= study.capacity) return res.status(403).json({ error: 'Study has reached capacity' });
 
+  // Enrol or retrieve existing enrolment
   let enrolment;
-  const { data: existingEnrol } = await sb.from('enrolments').select('*').eq('participant_id', participant.id).eq('study_id', studyId).maybeSingle();
+  const { data: existingEnrol } = await sb
+    .from('enrolments')
+    .select('*')
+    .eq('participant_id', participant.id)
+    .eq('study_id', studyId)
+    .maybeSingle();
+
   if (existingEnrol) {
     enrolment = existingEnrol;
-    if (enrolment.status === 'withdrawn') return res.status(403).json({ error: 'You have withdrawn from this study and cannot rejoin' });
+    // If withdrawn, delete it and create a new one
+    if (enrolment.status === 'withdrawn') {
+      console.log(`Deleting withdrawn enrolment ${enrolment.id} for participant ${participant.id}`);
+      const { error: delErr } = await sb
+        .from('enrolments')
+        .delete()
+        .eq('id', enrolment.id);
+      if (delErr) {
+        console.error('Delete error:', delErr);
+        return res.status(500).json({ error: 'Failed to delete withdrawn enrolment' });
+      }
+      // Now create a new enrolment
+      const randomGroup = assignRandomisationGroup();
+      const instrumentVersion = study.config?.version || '1.0.0';
+      const { data: newEnrol, error } = await sb
+        .from('enrolments')
+        .insert({
+          participant_id: participant.id,
+          study_id: studyId,
+          status: 'enrolled',
+          randomisation_group: randomGroup,
+          instrument_version: instrumentVersion,
+          data: {}
+        })
+        .select()
+        .single();
+      if (error) {
+        console.error('Insert error:', error);
+        return res.status(500).json({ error: 'Failed to create new enrolment' });
+      }
+      enrolment = newEnrol;
+      res.json({
+        participantCode: participant.participant_code,
+        enrolmentId: enrolment.id,
+        studyId,
+        isNew: true,
+        randomisationGroup: enrolment.randomisation_group,
+        participantId: participant.id
+      });
+      return;
+    }
+    // If status is 'completed', do not allow re‑enrolment
+    if (enrolment.status === 'completed') {
+      return res.status(403).json({ error: 'You have already completed this study' });
+    }
   } else {
+    // New enrolment – create it
     const randomGroup = assignRandomisationGroup();
     const instrumentVersion = study.config?.version || '1.0.0';
-    const { data: newEnrol, error } = await sb.from('enrolments').insert({
-      participant_id: participant.id, study_id: studyId, status: 'enrolled',
-      randomisation_group: randomGroup, instrument_version: instrumentVersion, data: {}
-    }).select().single();
+    const { data: newEnrol, error } = await sb
+      .from('enrolments')
+      .insert({
+        participant_id: participant.id,
+        study_id: studyId,
+        status: 'enrolled',
+        randomisation_group: randomGroup,
+        instrument_version: instrumentVersion,
+        data: {}
+      })
+      .select()
+      .single();
     if (error) return res.status(500).json({ error: error.message });
     enrolment = newEnrol;
   }
 
   res.json({
-    participantCode: participant.participant_code, enrolmentId: enrolment.id, studyId,
-    isNew: !existingEnrol, randomisationGroup: enrolment.randomisation_group, participantId: participant.id
+    participantCode: participant.participant_code,
+    enrolmentId: enrolment.id,
+    studyId,
+    isNew: !existingEnrol,
+    randomisationGroup: enrolment.randomisation_group,
+    participantId: participant.id
   });
 });
 
@@ -317,12 +406,30 @@ app.post('/api/progress/:enrolmentId', async (req, res) => {
 
 app.post('/api/enrolment/:enrolmentId/withdraw', async (req, res) => {
   const { enrolmentId } = req.params;
+  console.log('Attempting to withdraw enrolment:', enrolmentId);
+
   const { data: enrolment, error } = await sb.from('enrolments').select('*').eq('id', enrolmentId).single();
-  if (error) return res.status(404).json({ error: 'Enrolment not found' });
-  if (enrolment.status === 'completed' || enrolment.status === 'withdrawn') return res.status(400).json({ error: 'Cannot withdraw completed or already withdrawn enrolment' });
-  const { error: updateErr } = await sb.from('enrolments').update({ status: 'withdrawn', withdrawn_at: new Date(), data: {} }).eq('id', enrolmentId);
-  if (updateErr) return res.status(500).json({ error: 'Withdrawal failed' });
-  res.json({ success: true });
+  if (error) {
+    console.error('Enrolment not found:', error);
+    return res.status(404).json({ error: 'Enrolment not found' });
+  }
+
+  if (enrolment.status === 'completed' || enrolment.status === 'withdrawn') {
+    console.log('Enrolment already completed or withdrawn:', enrolment.status);
+    return res.status(400).json({ error: 'Cannot withdraw completed or already withdrawn enrolment' });
+  }
+
+  const { error: updateErr } = await sb.from('enrolments')
+    .update({ status: 'withdrawn', withdrawn_at: new Date(), data: {} })
+    .eq('id', enrolmentId);
+
+  if (updateErr) {
+    console.error('Withdrawal update failed:', updateErr);
+    return res.status(500).json({ error: 'Withdrawal failed' });
+  }
+
+  console.log('Withdrawal successful for enrolment:', enrolmentId);
+  res.json({ success: true, enrolmentId });
 });
 
 app.get('/api/study/:studyId/average_gain', async (req, res) => {
