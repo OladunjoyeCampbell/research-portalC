@@ -26,9 +26,14 @@
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  display: inline-block;  /* ensures background applies to text */
 }
+
 .dark .hero-title {
   background: linear-gradient(135deg, #e2e8f0, #60a5fa);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .hero-subtitle {
   font-size: 1.2rem;
@@ -315,9 +320,10 @@
   border-left: 4px solid var(--primary);
   color: var(--text-color);
 }
+
 .dark .example-box {
   background: #1e293b;
-  color: var(--text-color);
+  color: #e2e8f0;        /* explicit light color for dark mode */
   border-left-color: var(--primary);
 }
 

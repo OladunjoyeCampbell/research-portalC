@@ -33,6 +33,7 @@ let S = {
   demographics: {},
   consentGeneral: false,
   gradeConsent: false,
+  completedSaved: false,
   currentEnrolmentId: null,
   currentStudyId: null,
   randomisationGroup: null,
@@ -130,9 +131,10 @@ function getProgrammeType(matric) {
 function getStorageKey() {
   return `research_${S.participantCode}_${S.currentEnrolmentId}`;
 }
-function saveLocalProgress() {
+function saveLocalProgress(overrides = {}) {
   if (!S.currentEnrolmentId || !S.participantCode) return;
   if (!S.metrics) S.metrics = { puzzles: {} };
+  
   const toStore = {
     phase: S.phase,
     puzzleIdx: S.puzzleIdx,
@@ -152,7 +154,7 @@ function saveLocalProgress() {
     participantCode: S.participantCode,
     randomisationGroup: S.randomisationGroup,
     consentGeneral: S.consentGeneral,
-    gradeConsent: S.gradeConsent,            // <-- ADDED
+    gradeConsent: S.gradeConsent,
     audioOn: S.audioOn,
     participantEmail: S.participantEmail,
     participantGender: S.participantGender,
@@ -176,6 +178,10 @@ function saveLocalProgress() {
       currentStudyId: S.currentStudyId
     }
   };
+
+  // Apply overrides (e.g., { completed: true })
+  if (overrides.completed) toStore.completed = true;
+
   localStorage.setItem(getStorageKey(), JSON.stringify(toStore));
   fetch(`${API_BASE}/api/progress/${S.currentEnrolmentId}`, {
     method: 'POST',
@@ -495,7 +501,7 @@ function renderResume() {
       <div class="resume-stat"><div class="rnum">${preScore}</div><div class="rlbl">Pre-test %</div></div>
       <div class="resume-stat"><div class="rnum">${elapsedFormatted}</div><div class="rlbl">Time since you started</div></div>
     </div>
-    <div class="example-box" style="background:#eff6ff">Pick up exactly where you left off.</div>
+    <div class="example-box">Pick up exactly where you left off.</div>
     <div class="actions"><button class="btn btn-primary" id="btnResumeContinue">▶ Resume</button>
     <button class="btn btn-secondary" id="btnResumeRestart">↺ Start fresh</button></div></div>`;
 }
@@ -976,6 +982,7 @@ async function onSelectStudy(studyId) {
       S.puzzlesCompletedCount = 0;
       S.postTestPending = false;
       S.gradeConsent = false;
+      S.completedSaved = false;                     // <-- ADDED
       S.surveyAnswers = {};
       S.assAnswers = [];
       S.assQ = 0;
@@ -1022,6 +1029,7 @@ async function onSelectStudy(studyId) {
       S.puzzlesCompletedCount = 0;
       S.postTestPending = false;
       S.gradeConsent = false;
+      S.completedSaved = false;                     // <-- ADDED
       S.surveyAnswers = {};
       S.assAnswers = [];
       S.assQ = 0;
@@ -1258,17 +1266,8 @@ function bindSurveyDynamic() {
     if (msg) {
       msg.textContent = allFilled ? '' : (S.lang === 'en' ? 'Please answer all questions.' : 'Don Allah amsa duk tambayoyin.');
     }
-
-    if (!allFilled) {
-      const missing = requiredFields.filter(f => {
-        const val = S.surveyAnswers[f.id];
-        return val === undefined || val === null || val === '';
-      }).map(f => f.id);
-      console.log('Missing fields:', missing);
-    }
   };
 
-  // Bind select fields
   document.querySelectorAll('.sv-sel').forEach(sel => {
     sel.addEventListener('change', () => {
       S.surveyAnswers[sel.dataset.field] = sel.value;
@@ -1277,7 +1276,6 @@ function bindSurveyDynamic() {
     });
   });
 
-  // Bind Likert radio buttons
   document.querySelectorAll('.sv-lk').forEach(radio => {
     radio.addEventListener('change', () => {
       if (radio.checked) {
@@ -1288,7 +1286,6 @@ function bindSurveyDynamic() {
     });
   });
 
-  // Bind textarea fields (real‑time input)
   document.querySelectorAll('.sv-text').forEach(textarea => {
     textarea.addEventListener('input', () => {
       S.surveyAnswers[textarea.dataset.field] = textarea.value.trim();
@@ -1320,6 +1317,15 @@ function bindSurveyDynamic() {
     const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
     const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
 
+    // --- SURVEY-ONLY STUDY: immediately mark as completed ---
+    if (!hasPre && !hasPost && !hasPuzzles) {
+      console.log('Survey-only study completed. Saving completion to server.');
+      S.completedSaved = true;
+      S.completedPhases.posttest = true;
+      saveLocalProgress({ completed: true });
+    }
+
+    // Determine next phase
     if (hasPre) {
       S.phase = 'pre';
       S.assMode = 'pre';
@@ -1615,14 +1621,21 @@ function renderDebrief() {
   const hasPre = S.studyConfig.preQ && S.studyConfig.preQ.length > 0;
   const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
   const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
+  
   // If this is a survey-only study (no tests/puzzles)
   if (!hasPre && !hasPost && !hasPuzzles) {
     return `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
       <div style="text-align:center; padding:20px 0;">
         <div style="font-size:4rem;">✅</div>
-        <h2>Survey Submitted</h2>
-        <p style="font-size:1.1rem; margin:16px 0;">Thank you for completing the survey. Your responses have been recorded.</p>
-        <p style="color:var(--muted);">You may now view your participation certificate or return to the study selection page.</p>
+        <h2>Survey Completion — Debrief</h2>
+        <p style="font-size:1rem; margin:16px 0; text-align:left;">
+          <strong>If you submit this, your responses will be recorded and used in the research study if you chose "Yes, I consent" on the first page.</strong>
+        </p>
+        <div style="text-align:left; background:var(--gray-50); padding:16px; border-radius:12px; margin:16px 0;">
+          <p><strong>Before you go:</strong> We want to assure you that it is perfectly normal to experience the feelings of "being an impostor" that were described earlier. These feelings are common and are experienced by many people, including highly successful individuals. We study this phenomenon because it can affect performance and wellbeing.</p>
+          <p style="margin-top:12px;">If you want to speak with someone about your experience, please contact your department’s academic advisor or student support services.</p>
+          <p style="margin-top:12px; font-style:italic;">Thank you for your participation.</p>
+        </div>
         <div class="actions" style="justify-content:center; margin-top:24px;">
           <button class="btn btn-secondary" id="btnDebriefBack">📚 Back to Studies</button>
           <button class="btn btn-primary" id="btnDebriefNext">🎓 View Certificate</button>
@@ -1630,14 +1643,23 @@ function renderDebrief() {
       </div>
     </div>`;
   }
-  // Otherwise, show learning gain (original behaviour)
+  
+  // Otherwise, show learning gain (original behaviour for puzzle-based studies)
   const gain = (S.metrics?.postScore && S.metrics?.preScore) ? S.metrics.postScore - S.metrics.preScore : null;
   return `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><div class="cert-box"><div class="pcode-num">${S.participantCode}</div>${gain!==null?`<p>Learning gain: ${gain>=0?'+':''}${gain}%</p>`:''}</div><div class="actions"><button class="btn btn-primary" id="btnDebriefNext">View results →</button></div></div>`;
 }
 async function renderComplete() {
-  // If this is a survey-only study (no puzzles), show a simpler completion page
+  // --- SURVEY-ONLY STUDY (no puzzles) ---
   const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
   if (!hasPuzzles && S.completedPhases.survey && !S.completedPhases.puzzles) {
+    // Mark as completed on the server if not already done
+    if (!S.completedSaved) {
+      console.log('Survey-only study complete. Sending completion to server.');
+      S.completedSaved = true;
+      // Also mark posttest as completed for resume logic
+      S.completedPhases.posttest = true;
+      saveLocalProgress({ completed: true });
+    }
     return `${topbarHTML()}<div class="main-card">
       <div style="text-align:center; padding:20px 0;">
         <div style="font-size:4rem;">🎓</div>
@@ -1653,7 +1675,7 @@ async function renderComplete() {
     </div>`;
   }
 
-  // Only show post‑test waiting message if the participant actually completed all puzzles
+  // --- POST-TEST WAITING PERIOD (delayed post-test) ---
   if (S.postTestPending && S.completedPhases.puzzles && S.studyConfig?.min_days_between_pretest_posttest > 0) {
     const preDate = new Date(S.metrics.preCompletedAt);
     const now = new Date();
@@ -1669,7 +1691,7 @@ async function renderComplete() {
     </div>`;
   }
 
-  // Rest of your original renderComplete code (certificate, etc.) – for puzzle-based studies
+  // --- FULL STUDY (puzzle-based) – certificate page ---
   const solved = Object.values(S.metrics?.puzzles||{}).filter(p=>p.completed).length;
   let peerHtml = '';
   if (API_BASE !== undefined && S.currentStudyId) {
@@ -1686,13 +1708,21 @@ async function renderComplete() {
     if (new Date() >= availableAt) { followupStatus = `<div class="example-box" style="margin-top:14px;background:#e0f2fe">📋 The delayed post‑test is now available. Return to the study selection screen to take it.</div>`; }
     else { const daysLeft = Math.ceil((availableAt - new Date()) / (1000 * 60 * 60 * 24)); followupStatus = `<div class="example-box" style="margin-top:14px">⏳ The delayed post‑test will be available in ${daysLeft} days. You will be notified when ready.</div>`; }
   } else if (S.metrics && S.metrics.followupCompleted) { followupStatus = `<div class="example-box" style="margin-top:14px">✅ You have completed the delayed post‑test. Thank you for your participation!</div>`; }
+
+  // Mark as completed on the server if not already done
+  if (!S.completedSaved) {
+    console.log('Puzzle-based study complete. Sending completion to server.');
+    S.completedSaved = true;
+    saveLocalProgress({ completed: true });
+  }
+
   return `${topbarHTML()}<div class="main-card"><div class="score-hero"><div class="score-big">${solved}/${S.studyConfig.puzzles.length}</div><p>puzzles solved</p></div>${peerHtml}${followupStatus}<div class="actions"><button class="btn btn-secondary" id="btnViewDash">📊 Dashboard</button><button class="btn btn-primary" id="btnDownloadCertPDF">📄 Download Certificate (PDF)</button><button class="btn btn-secondary" id="btnPrintCert">🖨 Print certificate</button><button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button></div></div>`;
 }
 
 function bindDebrief() {
   // "Back to Studies" button (survey-only)
   el('btnDebriefBack')?.addEventListener('click', () => {
-    S.studyConfig = null;   // Clear old study name from topbar
+    S.studyConfig = null;
     S.phase = 'studySelect';
     go();
   });
