@@ -6,7 +6,7 @@
 
 html, body {
   overflow: visible;                /* allow zoom without clipping */
-  touch-action: pan-x pan-y;        /* allow pinch‑zoom and scroll */
+  touch-action: manipulation;       /* allow pinch‑zoom and double‑tap */
 }
 
 body {
