@@ -267,7 +267,7 @@ app.post('/api/enrol', async (req, res) => {
 
   if (existingEnrol) {
     enrolment = existingEnrol;
-    // If withdrawn, delete it and create a new one
+    // If withdrawn, DELETE it and create a new one
     if (enrolment.status === 'withdrawn') {
       console.log(`Deleting withdrawn enrolment ${enrolment.id} for participant ${participant.id}`);
       const { error: delErr } = await sb
