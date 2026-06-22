@@ -15,7 +15,7 @@ const session = require('express-session');
 const pg = require('pg');
 const pgSession = require('connect-pg-simple')(session);
 const { createClient } = require('@supabase/supabase-js');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');  // <-- NEW
 const path = require('path');
 
 const app = express();
@@ -67,34 +67,36 @@ const sb = createClient(
   { auth: { persistSession: false } }
 );
 
-// Email transporter (optional)
-let transporter = null;
-if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    secure: false,
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-  });
-  console.log('Email transporter configured');
+// ========== EMAIL using Resend ==========
+let resendClient = null;
+if (process.env.RESEND_API_KEY) {
+  resendClient = new Resend(process.env.RESEND_API_KEY);
+  console.log('Resend email client configured');
 } else {
-  console.warn('SMTP not configured – email reminders disabled');
+  console.warn('RESEND_API_KEY not set – email reminders and code recovery disabled');
 }
 
 async function sendEmail(to, subject, html) {
-  if (!transporter) return false;
+  if (!resendClient) return false;
   try {
-    await transporter.sendMail({
+    const { data, error } = await resendClient.emails.send({
       from: process.env.EMAIL_FROM || '"Research Portal" <noreply@example.com>',
-      to, subject, html
+      to: [to],
+      subject,
+      html
     });
-    console.log(`Email sent to ${to}`);
+    if (error) {
+      console.error('Resend error:', error);
+      return false;
+    }
+    console.log(`Email sent to ${to} (ID: ${data?.id})`);
     return true;
   } catch (err) {
     console.error('Email error:', err);
     return false;
   }
 }
+// =========================================
 
 // Helper functions
 function generateParticipantCode() {
@@ -169,6 +171,52 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// Participant check and code recovery endpoints
+app.get('/api/participant/check', async (req, res) => {
+  const { matric } = req.query;
+  if (!matric) return res.status(400).json({ error: 'matric required' });
+  const { data, error } = await sb
+    .from('participants')
+    .select('participant_code, email')
+    .ilike('matric', matric.trim().toUpperCase())
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  if (data) {
+    return res.json({ exists: true, participantCode: data.participant_code, email: data.email });
+  } else {
+    return res.json({ exists: false });
+  }
+});
+
+app.post('/api/participant/send-code', async (req, res) => {
+  const { matric } = req.body;
+  if (!matric) return res.status(400).json({ error: 'matric required' });
+  const { data, error } = await sb
+    .from('participants')
+    .select('participant_code, email, name')
+    .ilike('matric', matric.trim().toUpperCase())
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Participant not found' });
+  if (!data.email) return res.status(400).json({ error: 'No email address on file' });
+  const subject = 'Your Research Portal Participant Code';
+  const html = `
+    <h2>Participant Code Recovery</h2>
+    <p>Dear ${data.name || 'Participant'},</p>
+    <p>You requested your participant code for the Research Portal. Your code is:</p>
+    <p style="font-size:24px; font-weight:bold; background:#f0f0f0; padding:12px; text-align:center;">${data.participant_code}</p>
+    <p>You can use this code to resume your studies on the portal.</p>
+    <hr>
+    <small>If you did not request this, please ignore this email.</small>
+  `;
+  const sent = await sendEmail(data.email, subject, html);
+  if (sent) {
+    res.json({ success: true });
+  } else {
+    res.status(500).json({ error: 'Failed to send email' });
+  }
+});
+
 // PUBLIC ENDPOINTS
 app.get('/api/studies', async (req, res) => {
   const now = new Date().toISOString();
@@ -193,13 +241,14 @@ app.get('/api/studies/:id/config', async (req, res) => {
   res.json({ ...data.config, instruments: data.instruments, delayed_post_test_weeks: data.delayed_post_test_weeks });
 });
 
+// MODIFIED: /api/enrol – studyId optional
 app.post('/api/enrol', async (req, res) => {
   const { name, matric, lang, studyId, demographics, consentGeneral, academicSession, classSection, lecturerId, email, gender } = req.body;
-  if (!name || !matric || !studyId) {
-    return res.status(400).json({ error: 'name, matric, studyId required' });
+
+  if (!name || !matric) {
+    return res.status(400).json({ error: 'name and matric are required' });
   }
 
-  // Find or create participant
   let participant;
   const { data: existing } = await sb
     .from('participants')
@@ -238,7 +287,15 @@ app.post('/api/enrol', async (req, res) => {
     participant = newPart;
   }
 
-  // Check study availability
+  // If no studyId, just return participant info
+  if (!studyId) {
+    return res.json({
+      participantCode: participant.participant_code,
+      participantId: participant.id,
+    });
+  }
+
+  // ---- Study enrolment logic ----
   const { data: study } = await sb
     .from('studies')
     .select('status, capacity, end_date, delayed_post_test_weeks, config')
@@ -256,7 +313,6 @@ app.post('/api/enrol', async (req, res) => {
     .eq('study_id', studyId);
   if (enrolled >= study.capacity) return res.status(403).json({ error: 'Study has reached capacity' });
 
-  // Enrol or retrieve existing enrolment
   let enrolment;
   const { data: existingEnrol } = await sb
     .from('enrolments')
@@ -267,7 +323,6 @@ app.post('/api/enrol', async (req, res) => {
 
   if (existingEnrol) {
     enrolment = existingEnrol;
-    // If withdrawn, DELETE it and create a new one
     if (enrolment.status === 'withdrawn') {
       console.log(`Deleting withdrawn enrolment ${enrolment.id} for participant ${participant.id}`);
       const { error: delErr } = await sb
@@ -278,7 +333,6 @@ app.post('/api/enrol', async (req, res) => {
         console.error('Delete error:', delErr);
         return res.status(500).json({ error: 'Failed to delete withdrawn enrolment' });
       }
-      // Now create a new enrolment
       const randomGroup = assignRandomisationGroup();
       const instrumentVersion = study.config?.version || '1.0.0';
       const { data: newEnrol, error } = await sb
@@ -308,12 +362,10 @@ app.post('/api/enrol', async (req, res) => {
       });
       return;
     }
-    // If status is 'completed', do not allow re‑enrolment
     if (enrolment.status === 'completed') {
       return res.status(403).json({ error: 'You have already completed this study' });
     }
   } else {
-    // New enrolment – create it
     const randomGroup = assignRandomisationGroup();
     const instrumentVersion = study.config?.version || '1.0.0';
     const { data: newEnrol, error } = await sb
@@ -347,7 +399,7 @@ app.get('/api/enrolments/me', async (req, res) => {
   if (!code) return res.status(400).json({ error: 'participant_code required' });
   const { data: participant, error: pErr } = await sb
     .from('participants')
-    .select('id, name, email, gender, participant_code')
+    .select('id, name, email, gender, participant_code, matric')
     .eq('participant_code', code)
     .single();
   if (pErr || !participant) return res.status(404).json({ error: 'Participant not found' });
@@ -356,14 +408,14 @@ app.get('/api/enrolments/me', async (req, res) => {
     .select(`*, study:study_id (id, study_key, title_en, title_ha, status)`)
     .eq('participant_id', participant.id);
   if (error) return res.status(500).json({ error: error.message });
-  // Attach participant info to each enrolment (or send separately)
   const result = data.map(enrol => ({
     ...enrol,
     participant: {
       name: participant.name,
       email: participant.email,
       gender: participant.gender,
-      participant_code: participant.participant_code
+      participant_code: participant.participant_code,
+      matric: participant.matric
     }
   }));
   res.json(result);

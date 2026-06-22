@@ -204,7 +204,7 @@ function loadLocalProgress() {
     S.puzzlesCompletedCount = saved.puzzlesCompletedCount || 0;
     S.totalPuzzles = saved.totalPuzzles || (S.studyConfig?.puzzles?.length || 0);
     S.postTestPending = saved.postTestPending || false;
-    S.gradeConsent = saved.gradeConsent || false;   // <-- ADDED
+    S.gradeConsent = saved.gradeConsent || false;
     return saved;
   } catch(e) { console.warn('Failed to parse saved progress', e); return null; }
 }
@@ -221,10 +221,13 @@ async function apiAdminFetchStudies() {
 async function apiFetchStudyConfig(studyId) {
   try { const res = await fetch(`${API_BASE}/api/studies/${studyId}/config`); if(!res.ok) return null; return await res.json(); } catch(e){ return null; }
 }
+// MODIFIED: studyId is optional. If not provided, only participant is created/updated.
 async function apiEnrol(name, matric, lang, studyId, demographics, consentGeneral, academicSession, classSection, lecturerId, email, gender) {
+  const body = { name, matric, lang, demographics, consentGeneral, academicSession, classSection, lecturerId, email, gender };
+  if (studyId) body.studyId = studyId;
   const res = await fetch(`${API_BASE}/api/enrol`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name,matric,lang,studyId,demographics,consentGeneral,academicSession,classSection,lecturerId,email,gender})
+    body:JSON.stringify(body)
   });
   if(!res.ok) throw new Error(await res.text());
   return res.json();
@@ -280,6 +283,22 @@ async function apiSendReminders(studyId, daysInactive = 3) {
   return res.json();
 }
 
+// NEW API calls for participant check and code recovery
+async function apiCheckParticipant(matric) {
+  const res = await fetch(`${API_BASE}/api/participant/check?matric=${encodeURIComponent(matric)}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+async function apiSendCode(matric) {
+  const res = await fetch(`${API_BASE}/api/participant/send-code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ matric })
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // ============================================================
 // TIMEOUT
 // ============================================================
@@ -315,11 +334,15 @@ function topbarHTML() {
   const themeIcon = theme === 'dark' ? '☀️' : '🌙';
   const themeText = theme === 'dark' ? 'Light' : 'Dark';
   
-  // Define phases where we are inside a study (not on study selection, registration, etc.)
   const insideStudy = ['orient','consent','survey','pre','study','faded','attempt','reflect','code','review','post','followup','guided','debrief','complete','resume'].includes(S.phase);
   const studyContext = (insideStudy && S.studyConfig && S.studyConfig.title_en) 
     ? `<div style="font-size:0.8rem; color:var(--primary); margin-top:4px;">📖 ${S.studyConfig.title_en}</div>` 
     : '';
+
+  // Determine if there are any other unenrolled studies (for "Other studies" button)
+  const hasOtherStudies = S.availableStudies.some(study => 
+    !S.myEnrolments.some(e => e.study_id === study.id && (e.status === 'enrolled' || e.status === 'in_progress'))
+  );
   
   return `<div class="topbar">
     <div class="brand">
@@ -330,9 +353,9 @@ function topbarHTML() {
     <div class="topbar-btns">
       <button class="pill" id="btnTheme">${themeIcon} ${themeText}</button>
       <button class="pill ${S.audioOn?'pill-green':'pill-gray'}" id="btnAudio">${S.audioOn?'🔊':'🔇'} Audio</button>
-      ${S.phase !== 'hero' && S.phase !== 'studySelect' && S.phase !== 'adminLogin' && S.currentStudyId && !S.isAdminMode ? `<button class="pill pill-amber" id="btnStudySelect">📚 All studies</button>` : ''}
-      ${S.studyConfig?.bilingual === true && (S.phase !== 'hero' && S.phase !== 'studySelect' && S.phase !== 'adminLogin' && !S.isAdminMode) ? `<button class="pill pill-blue" id="btnLangStudy">${S.studyLang === 'en' ? 'Hausa' : 'English'}</button>` : ''}
-      ${S.phase !== 'hero' && S.phase !== 'studySelect' && S.phase !== 'adminLogin' && S.currentEnrolmentId && !S.isAdminMode ? `<button class="pill pill-danger" id="btnWithdraw">🚪 Withdraw & Delete Data</button>` : ''}
+      ${insideStudy && hasOtherStudies ? `<button class="pill pill-amber" id="btnOtherStudies">📚 Other studies</button>` : ''}
+      ${S.studyConfig?.bilingual === true && insideStudy ? `<button class="pill pill-blue" id="btnLangStudy">${S.studyLang === 'en' ? 'Hausa' : 'English'}</button>` : ''}
+      ${insideStudy && S.currentEnrolmentId ? `<button class="pill pill-danger" id="btnWithdraw">🚪 Withdraw & Delete Data</button>` : ''}
       ${S.phase !== 'hero' && !S.isAdminMode ? `<button class="pill pill-gray" id="btnLogoutPortal">🚪 Logout</button>` : ''}
     </div>
   </div>`;
@@ -427,7 +450,6 @@ function bindHero() {
       const enrolments = await apiGetMyEnrolments(code);
       if (!enrolments.length) throw new Error('No enrolments found for this code');
       
-      // Filter to active enrolments only (exclude withdrawn and completed)
       const active = enrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
       if (active.length === 0) {
         document.getElementById('resumeErr').innerText = 'You have no studies in progress. All are completed or withdrawn.';
@@ -441,7 +463,6 @@ function bindHero() {
       S.participantEmail = participant.email || '';
       S.participantGender = participant.gender || '';
 
-      // If multiple studies, show selection screen
       if (active.length > 1) {
         S.resumeCandidates = active;
         S.phase = 'resumeSelect';
@@ -449,7 +470,6 @@ function bindHero() {
         return;
       }
 
-      // Single study – resume directly
       const enrol = active[0];
       const config = await apiFetchStudyConfig(enrol.study_id);
       if (!config || !config.puzzles) throw new Error('Study configuration missing');
@@ -465,7 +485,6 @@ function bindHero() {
         if (remote?.progress) Object.assign(S, remote.progress);
       }
 
-      // Check if survey-only and survey completed
       const hasPre = config.preQ && config.preQ.length > 0;
       const hasPost = config.postQ && config.postQ.length > 0;
       const hasPuzzles = config.puzzles && config.puzzles.length > 0;
@@ -489,7 +508,6 @@ function renderResume() {
   const guided = Object.values(m.puzzles || {}).filter(p => p.guided).length;
   const preScore = (m.preScore !== undefined && m.preScore !== null) ? `${m.preScore}%` : '—';
   const totalPuzzles = S.totalPuzzles || S.studyConfig?.puzzles?.length || 0;
-  // Calculate time since enrolment
   const totalElapsed = m.startedAt ? (Date.now() - m.startedAt) : 0;
   const elapsedFormatted = formatElapsedTime(totalElapsed);
   const displayName = (S.participantName && S.participantName.trim() !== '') ? S.participantName : 'Participant';
@@ -509,29 +527,23 @@ function bindResume() {
   const continueBtn = document.getElementById('btnResumeContinue');
   const restartBtn = document.getElementById('btnResumeRestart');
 
-  // Determine if this is a survey-only study
   const hasPre = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
   const hasPost = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
   const hasPuzzles = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
   const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles;
 
-  // SURVEY-ONLY HANDLING (top-level)
   if (isSurveyOnly) {
     if (S.completedPhases.survey) {
-      // Already completed – go to certificate
       S.phase = 'complete';
       go();
       return;
     } else {
-      // Not completed – resume at the survey page
       S.phase = 'survey';
-      // Ensure survey answers are loaded (already in S)
       go();
       return;
     }
   }
 
-  // If post‑test is pending, show waiting message
   if (S.postTestPending) {
     S.phase = 'complete';
     go();
@@ -539,7 +551,6 @@ function bindResume() {
   }
 
   continueBtn?.addEventListener('click', () => {
-    // Re-evaluate survey-only status
     const hasPre2 = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
     const hasPost2 = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
     const hasPuzzles2 = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
@@ -559,7 +570,6 @@ function bindResume() {
 
     const rs = S._resumeState || S.metrics?._resumeState;
     if (rs) {
-      // If saved phase is 'survey' and survey already completed, skip appropriately
       if (rs.phase === 'survey' && S.completedPhases.survey) {
         if (hasPre2) {
           S.phase = 'pre';
@@ -579,7 +589,6 @@ function bindResume() {
         S.puzzleIdx = rs.puzzleIdx || 0;
         S.assQ = rs.assQ || 0;
         S.assAnswers = rs.assAnswers || [];
-        S.assMode = rs.assMode || 'pre';
         S.surveyAnswers = rs.surveyAnswers || {};
         S.reviewQueue = rs.reviewQueue || [];
         S.reviewIdx = rs.reviewIdx || 0;
@@ -588,7 +597,6 @@ function bindResume() {
         S.fadedLocked = rs.fadedLocked || [];
       }
     } else {
-      // Fallback to phase flags
       if (S.completedPhases.posttest) { S.phase='complete'; go(); return; }
       if (S.completedPhases.puzzles && !S.completedPhases.posttest) {
         const minDays = S.studyConfig?.min_days_between_pretest_posttest || 0;
@@ -624,13 +632,11 @@ function bindResume() {
         return;
       }
       if (S.completedPhases.survey && !S.completedPhases.pretest) {
-        // Only go to pre-test if pre-test exists
         if (hasPre2) {
           S.phase = 'pre';
           S.assMode = 'pre';
           S.assQ = S.assAnswers.length;
         } else {
-          // If no pre-test, go to post-test if exists, else complete
           if (hasPost2) {
             S.phase = 'post';
             S.assMode = 'post';
@@ -643,7 +649,6 @@ function bindResume() {
         go();
         return;
       }
-      // If we reach here, default to orient (should not happen for survey-only)
       S.phase = 'orient';
     }
     go();
@@ -679,6 +684,13 @@ function renderRegister() {
       <div><label>Academic session (e.g., 2025/2026)</label><input id="inpSession" placeholder="2025/2026" /></div>
       <div><label>Class section</label><input id="inpSection" placeholder="A/B/C" /></div>
     </div>
+    <div id="existingParticipantMsg" style="display:none;" class="example-box">
+      <p><strong>⚠️ You are already registered.</strong></p>
+      <p>Please use the <strong>“Resume Existing Study”</strong> button on the home page and enter your participant code.</p>
+      <p>If you have forgotten your code, click the button below to receive it by email.</p>
+      <button class="btn btn-secondary" id="btnSendCodeRecovery">📧 Send my participant code to my email</button>
+      <span id="recoveryStatus" style="margin-left:12px;"></span>
+    </div>
     <p id="regErr" style="color:var(--danger);text-align:center"></p>
     <div class="actions"><button class="btn btn-primary" id="btnRegisterSubmit">Continue to study selection →</button></div>
   </div>`;
@@ -687,6 +699,10 @@ function renderRegister() {
 function bindRegister() {
   const submitBtn = document.getElementById('btnRegisterSubmit');
   const errEl = document.getElementById('regErr');
+  const existingMsg = document.getElementById('existingParticipantMsg');
+  const sendCodeBtn = document.getElementById('btnSendCodeRecovery');
+  const recoveryStatus = document.getElementById('recoveryStatus');
+
   submitBtn?.addEventListener('click', async () => {
     const name = document.getElementById('inpName')?.value.trim();
     const matric = document.getElementById('inpMatric')?.value.trim();
@@ -704,63 +720,77 @@ function bindRegister() {
     S.participantMatric = matric;
     S.participantEmail = email;
     S.participantGender = gender;
-    const academicSession = document.getElementById('inpSession')?.value.trim() || '';
-    const classSection = document.getElementById('inpSection')?.value.trim() || '';
-    S.availableStudies = await apiFetchStudies();
-    if (!S.availableStudies.length) {
-      if (errEl) errEl.innerText = 'No open studies at this time.';
+
+    // Check if participant already exists
+    try {
+      const check = await apiCheckParticipant(matric);
+      if (check.exists) {
+        // Show existing participant message
+        if (existingMsg) existingMsg.style.display = 'block';
+        if (errEl) errEl.innerText = '';
+        // Optionally, pre-fill email if missing? Not needed.
+        // Recovery button will send code.
+        return;
+      }
+    } catch (e) {
+      if (errEl) errEl.innerText = 'Error checking registration: ' + e.message;
       return;
     }
+
+    // New participant – create without study enrolment
     try {
-      // Step 1: Create participant with temporary enrolment
-      const tempEnrol = await apiEnrol(name, matric, 'en', S.availableStudies[0].id, { gender }, false, academicSession, classSection, '', email, gender);
-      S.participantCode = tempEnrol.participantCode;
-
-      // Step 2: Withdraw the temporary enrolment
-      try {
-        await apiWithdraw(tempEnrol.enrolmentId);
-        console.log('Temporary enrolment withdrawn:', tempEnrol.enrolmentId);
-      } catch (withdrawErr) {
-        // If the error is that the enrolment is already withdrawn, ignore it.
-        if (withdrawErr.message && withdrawErr.message.includes('Cannot withdraw completed or already withdrawn enrolment')) {
-          console.log('Enrolment already withdrawn, skipping withdrawal');
-        } else {
-          throw withdrawErr;
-        }
-      }
-
-      // Step 3: Fetch fresh enrolments
+      const academicSession = document.getElementById('inpSession')?.value.trim() || '';
+      const classSection = document.getElementById('inpSection')?.value.trim() || '';
+      // No studyId provided
+      const result = await apiEnrol(name, matric, 'en', null, { gender }, false, academicSession, classSection, '', email, gender);
+      S.participantCode = result.participantCode;
+      // Fetch fresh enrolments (should be empty)
       S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
-      console.log('Enrolments after withdrawal:', S.myEnrolments);
-
-      // Step 4: Clear any study-specific state
-      S.currentEnrolmentId = null;
-      S.currentStudyId = null;
-      S.studyConfig = null;
-      S.metrics = null;
-      S.surveyAnswers = {};
-      S.assAnswers = [];
-
+      // Get available studies
+      S.availableStudies = await apiFetchStudies();
       S.phase = 'studySelect';
       go();
     } catch (e) {
-      console.error('Registration error:', e);
       if (errEl) errEl.innerText = e.message || 'Registration failed. Please try again.';
+    }
+  });
+
+  // Code recovery button
+  sendCodeBtn?.addEventListener('click', async () => {
+    const matric = document.getElementById('inpMatric')?.value.trim();
+    if (!matric) {
+      recoveryStatus.textContent = 'Please enter your matric number first.';
+      return;
+    }
+    recoveryStatus.textContent = 'Sending...';
+    try {
+      await apiSendCode(matric);
+      recoveryStatus.textContent = '✅ Code sent to your email.';
+    } catch (e) {
+      recoveryStatus.textContent = '❌ ' + e.message;
     }
   });
 }
 function renderStudySelect() {
-  // Filter only active enrolments (not withdrawn)
-  const ongoing = S.myEnrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
+  // Filter out studies that the participant is already enrolled in (active)
+  const activeStudyIds = S.myEnrolments
+    .filter(e => e.status === 'enrolled' || e.status === 'in_progress')
+    .map(e => e.study_id);
+  const availableNotEnrolled = S.availableStudies.filter(study => !activeStudyIds.includes(study.id));
+
   let followupHtml = '';
   const mainStudy = S.myEnrolments.find(e => e.status === 'completed');
   if (mainStudy && S.metrics && S.metrics.mainCompletedAt && !S.metrics.followupCompleted && isFollowupAvailable()) {
     followupHtml = `<div class="example-box" style="margin-top:20px;background:#e0f2fe;border-color:#7dd3fc"><strong>📋 Follow‑up post‑test available!</strong> The waiting period has passed. You can now take the delayed post‑test.<div class="actions" style="margin-top:10px"><button class="btn btn-primary" id="btnStartFollowup">Start follow‑up →</button></div></div>`;
   }
+
+  // Ongoing studies (active)
+  const ongoing = S.myEnrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
+
   return `${topbarHTML()}<div class="main-card"><h2>Available Studies</h2>
-    <p>Select a study to begin. You can participate in multiple studies.</p>
+    <p>${ongoing.length ? 'Select a new study to begin. Your ongoing studies are listed below.' : 'Select a study to begin. You can participate in multiple studies.'}</p>
     <div class="card-grid">
-      ${S.availableStudies.map(study => `
+      ${availableNotEnrolled.map(study => `
         <button class="card study-card" data-study-id="${study.id}">
           <span class="card-emoji">📘</span>
           <div class="card-label">
@@ -782,34 +812,29 @@ function renderStudySelect() {
 }
 
 function bindStudySelect() {
-  // Attach click handlers to study cards
   document.querySelectorAll('.card[data-study-id]').forEach(card => {
     card.onclick = () => onSelectStudy(parseInt(card.dataset.studyId));
   });
 
-  // "Resume a study" button – only for active enrolments
   const resumeBtn = el('btnResumeAny');
   if (resumeBtn) {
     resumeBtn.addEventListener('click', () => {
       const ongoing = S.myEnrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
       if (ongoing.length) {
-        // If there is only one ongoing study, resume directly
         if (ongoing.length === 1) {
           onSelectStudy(ongoing[0].study_id);
           return;
         }
-        // If multiple, show selection (you can also use the resume selection screen)
-        // For simplicity, we'll just take the first one; but you could implement a selection dialog.
-        // However, we already have a resumeSelect screen; we could route to it.
-        // For now, just take the first one:
-        onSelectStudy(ongoing[0].study_id);
+        // If multiple, show resume selection
+        S.resumeCandidates = ongoing;
+        S.phase = 'resumeSelect';
+        go();
       } else {
         alert('No ongoing studies to resume.');
       }
     });
   }
 
-  // Follow‑up post‑test button (if any)
   el('btnStartFollowup')?.addEventListener('click', () => {
     S.assMode = 'post';
     S.assQ = 0;
@@ -849,7 +874,6 @@ function bindResumeSelect() {
     card.onclick = async () => {
       const studyId = parseInt(card.dataset.studyId);
       const enrolmentId = parseInt(card.dataset.enrolmentId);
-      // Find the enrolment data
       const enrol = S.resumeCandidates.find(e => e.id === enrolmentId);
       if (!enrol) return;
       try {
@@ -859,7 +883,6 @@ function bindResumeSelect() {
         S.currentStudyId = studyId;
         S.studyConfig = config;
         S.totalPuzzles = config.puzzles.length;
-        // Load progress
         const local = loadLocalProgress();
         if (local) Object.assign(S, local);
         else {
@@ -886,7 +909,7 @@ async function onSelectStudy(studyId) {
     console.log('S.participantMatric:', S.participantMatric);
     console.log('S.participantCode:', S.participantCode);
 
-    // ----- SAFETY NET: ensure participant details are present -----
+    // Safety net: ensure participant details are present
     if (!S.participantName || !S.participantMatric) {
       console.log('Participant details missing, attempting to fetch...');
       if (S.participantCode) {
@@ -929,12 +952,11 @@ async function onSelectStudy(studyId) {
     const participantEmail = S.participantEmail;
     const participantGender = S.participantGender;
 
-    // If enrolment is withdrawn, ignore it and treat as new
+    // If enrolment is withdrawn, treat as non-existent and refresh list
     if (enrolment && enrolment.status === 'withdrawn') {
       console.log('Found withdrawn enrolment, treating as non-existent:', enrolment.id);
       S.myEnrolments = S.myEnrolments.filter(e => e.id !== enrolment.id);
       enrolment = null;
-      // Refresh enrolments from server to stay in sync
       S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
     }
 
@@ -982,7 +1004,6 @@ async function onSelectStudy(studyId) {
       S.puzzlesCompletedCount = 0;
       S.postTestPending = false;
       S.gradeConsent = false;
-      S.completedSaved = false;                     // <-- ADDED
       S.surveyAnswers = {};
       S.assAnswers = [];
       S.assQ = 0;
@@ -1029,7 +1050,6 @@ async function onSelectStudy(studyId) {
       S.puzzlesCompletedCount = 0;
       S.postTestPending = false;
       S.gradeConsent = false;
-      S.completedSaved = false;                     // <-- ADDED
       S.surveyAnswers = {};
       S.assAnswers = [];
       S.assQ = 0;
@@ -1211,7 +1231,6 @@ function renderSurveyDynamic() {
       });
       html += `</div></div>`;
     } else if (f.type === 'text') {
-      // Open-ended text field
       const label = L(f, 'label');
       const placeholder = L(f, 'placeholder') || 'Write your answer here…';
       html += `<div class="field-row" style="margin-bottom:20px;">
@@ -1240,7 +1259,6 @@ function bindSurveyDynamic() {
   if (btn) btn.disabled = true;
 
   const updateBtn = () => {
-    // Read all current values from DOM
     document.querySelectorAll('.sv-sel').forEach(sel => {
       if (sel.value !== '') {
         S.surveyAnswers[sel.dataset.field] = sel.value;
@@ -1297,7 +1315,6 @@ function bindSurveyDynamic() {
   updateBtn();
 
   el('btnSurveyNext')?.addEventListener('click', () => {
-    // Final capture before proceeding
     document.querySelectorAll('.sv-sel').forEach(sel => {
       if (sel.value !== '') S.surveyAnswers[sel.dataset.field] = sel.value;
     });
@@ -1317,7 +1334,6 @@ function bindSurveyDynamic() {
     const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
     const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
 
-    // --- SURVEY-ONLY STUDY: immediately mark as completed ---
     if (!hasPre && !hasPost && !hasPuzzles) {
       console.log('Survey-only study completed. Saving completion to server.');
       S.completedSaved = true;
@@ -1325,7 +1341,6 @@ function bindSurveyDynamic() {
       saveLocalProgress({ completed: true });
     }
 
-    // Determine next phase
     if (hasPre) {
       S.phase = 'pre';
       S.assMode = 'pre';
@@ -1377,7 +1392,7 @@ function bindAssessmentDynamic(mode) {
         saveLocalProgress();
         S.phase = 'study';
         S.puzzleIdx = 0;
-        saveLocalProgress();   // <-- ADD THIS    
+        saveLocalProgress();
         go();
       } else {
         S.completedPhases.posttest = true;
@@ -1531,7 +1546,6 @@ function bindAttemptDynamic(reviewMode = false) {
             if (rp) { S.fadedLocked = []; S.available = shuffle(rp.cards); S.userSeq = []; }
             go();
           } else {
-            // Last review puzzle completed
             if (canStartPostTest()) {
               S.phase = 'post';
               S.assMode = 'post';
@@ -1622,7 +1636,6 @@ function renderDebrief() {
   const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
   const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
   
-  // If this is a survey-only study (no tests/puzzles)
   if (!hasPre && !hasPost && !hasPuzzles) {
     return `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
       <div style="text-align:center; padding:20px 0;">
@@ -1644,19 +1657,15 @@ function renderDebrief() {
     </div>`;
   }
   
-  // Otherwise, show learning gain (original behaviour for puzzle-based studies)
   const gain = (S.metrics?.postScore && S.metrics?.preScore) ? S.metrics.postScore - S.metrics.preScore : null;
   return `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><div class="cert-box"><div class="pcode-num">${S.participantCode}</div>${gain!==null?`<p>Learning gain: ${gain>=0?'+':''}${gain}%</p>`:''}</div><div class="actions"><button class="btn btn-primary" id="btnDebriefNext">View results →</button></div></div>`;
 }
 async function renderComplete() {
-  // --- SURVEY-ONLY STUDY (no puzzles) ---
   const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
   if (!hasPuzzles && S.completedPhases.survey && !S.completedPhases.puzzles) {
-    // Mark as completed on the server if not already done
     if (!S.completedSaved) {
       console.log('Survey-only study complete. Sending completion to server.');
       S.completedSaved = true;
-      // Also mark posttest as completed for resume logic
       S.completedPhases.posttest = true;
       saveLocalProgress({ completed: true });
     }
@@ -1675,7 +1684,6 @@ async function renderComplete() {
     </div>`;
   }
 
-  // --- POST-TEST WAITING PERIOD (delayed post-test) ---
   if (S.postTestPending && S.completedPhases.puzzles && S.studyConfig?.min_days_between_pretest_posttest > 0) {
     const preDate = new Date(S.metrics.preCompletedAt);
     const now = new Date();
@@ -1691,7 +1699,6 @@ async function renderComplete() {
     </div>`;
   }
 
-  // --- FULL STUDY (puzzle-based) – certificate page ---
   const solved = Object.values(S.metrics?.puzzles||{}).filter(p=>p.completed).length;
   let peerHtml = '';
   if (API_BASE !== undefined && S.currentStudyId) {
@@ -1709,7 +1716,6 @@ async function renderComplete() {
     else { const daysLeft = Math.ceil((availableAt - new Date()) / (1000 * 60 * 60 * 24)); followupStatus = `<div class="example-box" style="margin-top:14px">⏳ The delayed post‑test will be available in ${daysLeft} days. You will be notified when ready.</div>`; }
   } else if (S.metrics && S.metrics.followupCompleted) { followupStatus = `<div class="example-box" style="margin-top:14px">✅ You have completed the delayed post‑test. Thank you for your participation!</div>`; }
 
-  // Mark as completed on the server if not already done
   if (!S.completedSaved) {
     console.log('Puzzle-based study complete. Sending completion to server.');
     S.completedSaved = true;
@@ -1720,13 +1726,11 @@ async function renderComplete() {
 }
 
 function bindDebrief() {
-  // "Back to Studies" button (survey-only)
   el('btnDebriefBack')?.addEventListener('click', () => {
     S.studyConfig = null;
     S.phase = 'studySelect';
     go();
   });
-  // "View Certificate" / "View results" button
   el('btnDebriefNext')?.addEventListener('click', () => {
     S.phase = 'complete';
     go();
@@ -1757,7 +1761,7 @@ function bindComplete() {
     win.print();
   });
   el('btnBackToStudies')?.addEventListener('click', () => {
-    S.studyConfig = null;   // Clear old study name from topbar
+    S.studyConfig = null;
     S.phase = 'studySelect';
     go();
   });
@@ -1975,8 +1979,6 @@ async function go() {
     } catch(e) { alert('Could not load study. Please try again.'); S.phase='hero'; go(); return; }
   }
 
-  // --- ADD THIS BLOCK ---
-  // Fetch open studies when on study selection page (e.g., after resume)
   if (S.phase === 'studySelect' && S.availableStudies.length === 0) {
     S.availableStudies = await apiFetchStudies();
   }
@@ -2024,17 +2026,16 @@ async function go() {
   app.innerHTML = html;
   el('btnTheme')?.addEventListener('click',()=>{ toggleTheme(); });
   el('btnAudio')?.addEventListener('click',()=>{ S.audioOn = !S.audioOn; go(); });
-  el('btnStudySelect')?.addEventListener('click', () => {
-    const safePhases = ['hero', 'register', 'studySelect', 'adminLogin', 'dashboard'];
-    if (!safePhases.includes(S.phase)) {
-      if (confirm('You are in the middle of a study activity. Going back to study selection may cause loss of unsaved progress. Are you sure?')) {
-        S.phase = 'studySelect';
-        go();
-      }
-    } else {
-      S.phase = 'studySelect';
-      go();
+  // "Other studies" button – when inside a study
+  el('btnOtherStudies')?.addEventListener('click', async () => {
+    // Refresh enrolments to get the latest list
+    if (S.participantCode) {
+      S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
     }
+    // Also refresh available studies (in case new ones appeared)
+    S.availableStudies = await apiFetchStudies();
+    S.phase = 'studySelect';
+    go();
   });
   el('btnLangStudy')?.addEventListener('click',()=>{ if(S.studyConfig?.bilingual) { S.studyLang = S.studyLang === 'en' ? 'ha' : 'en'; saveLocalProgress(); go(); } });
   el('btnWithdraw')?.addEventListener('click', async () => { if(confirm('Withdraw? Progress lost.')) { await apiWithdraw(S.currentEnrolmentId); localStorage.removeItem(getStorageKey()); S.phase='hero'; go(); } });
