@@ -130,6 +130,42 @@ function computeMissingDataFlags(progress, studyConfig) {
   return flags;
 }
 
+async function generateUniqueParticipantCode() {
+  let code;
+  let exists = true;
+  let attempts = 0;
+  const maxAttempts = 20; // more than enough
+
+  while (exists && attempts < maxAttempts) {
+    code = generateParticipantCode();
+    // Check if this code already exists
+    const { data, error } = await sb
+      .from('participants')
+      .select('participant_code')
+      .eq('participant_code', code)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Error checking participant code uniqueness:', error);
+      // Fallback: generate a code with timestamp suffix (very safe)
+      const fallbackCode = `AL-${Date.now().toString(36).toUpperCase()}`;
+      return fallbackCode;
+    }
+
+    if (!data) {
+      exists = false; // code is unique, we can use it
+    }
+    attempts++;
+  }
+
+  if (attempts >= maxAttempts) {
+    // Absolute fallback – practically never happens
+    return `AL-${Date.now().toString(36).toUpperCase()}`;
+  }
+
+  return code;
+}
+
 function formatDateForNigeria(dateString) {
   if (!dateString) return '';
   try {
@@ -282,23 +318,29 @@ app.post('/api/enrol', async (req, res) => {
     if (gender) updates.gender = gender;
     if (Object.keys(updates).length) await sb.from('participants').update(updates).eq('id', participant.id);
   } else {
-    const code = generateParticipantCode();
-    const { data: newPart, error } = await sb.from('participants').insert({
-      participant_code: code,
-      name: name.trim(),
-      matric: matric.trim().toUpperCase(),
-      lang: lang || 'en',
-      demographics: demographics || {},
-      consent_general: consentGeneral || false,
-      academic_session: academicSession,
-      class_section: classSection,
-      lecturer_id: lecturerId,
-      email: email || null,
-      gender: gender || null
-    }).select().single();
-    if (error) return res.status(500).json({ error: error.message });
-    participant = newPart;
+  const code = await generateUniqueParticipantCode();
+  const { data: newPart, error } = await sb.from('participants').insert({
+    participant_code: code,
+    name: name.trim(),
+    matric: matric.trim().toUpperCase(),
+    lang: lang || 'en',
+    demographics: demographics || {},
+    consent_general: consentGeneral || false,
+    academic_session: academicSession,
+    class_section: classSection,
+    lecturer_id: lecturerId,
+    email: email || null,
+    gender: gender || null
+  }).select().single();
+  if (error) {
+    // Check if it's a duplicate code error (just in case)
+    if (error.code === '23505') { // PostgreSQL unique violation
+      return res.status(409).json({ error: 'System error: duplicate participant code. Please try again.' });
+    }
+    return res.status(500).json({ error: error.message });
   }
+  participant = newPart;
+}
 
   // If no studyId, just return participant info
   if (!studyId) {
