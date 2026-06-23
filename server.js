@@ -129,6 +129,18 @@ function computeMissingDataFlags(progress, studyConfig) {
   if (completedPuzzles < totalPuzzles) flags.missing_puzzles = true;
   return flags;
 }
+
+function formatDateForNigeria(dateString) {
+  if (!dateString) return '';
+  try {
+    const date = new Date(dateString);
+    if (isNaN(date)) return dateString;
+    return date.toLocaleString('en-GB', { timeZone: 'Africa/Lagos', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return dateString;
+  }
+}
+
 async function logAdminAction(req, action, targetType, targetId, details) {
   const ip = req.ip || req.connection.remoteAddress || 'unknown';
   await sb.from('admin_audit_log').insert({
@@ -145,6 +157,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 function isAdminLoggedIn(req) {
   return req.session && req.session.admin === true;
 }
+
 
 // Health check
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date() }));
@@ -531,6 +544,7 @@ app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
     .select(`*, participant:participant_id (name, matric, participant_code, demographics, lang, academic_session, class_section, lecturer_id, email, gender)`)
     .eq('study_id', studyId);
   if (error) return res.status(500).json({ error: error.message });
+
   const flatten = (obj, prefix = '') => {
     let result = {};
     for (let key in obj) {
@@ -545,9 +559,24 @@ app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
     }
     return result;
   };
-  const rows = data.map(enrol => flatten({ enrolment: enrol, participant: enrol.participant }));
+
+  const rows = data.map(enrol => {
+    const flat = flatten({ enrolment: enrol, participant: enrol.participant });
+    // Format any field that looks like an ISO date string
+    for (const key of Object.keys(flat)) {
+      const val = flat[key];
+      if (typeof val === 'string' && val.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)) {
+        flat[key] = formatDateForNigeria(val);
+      }
+    }
+    return flat;
+  });
+
   const headers = rows.length ? Object.keys(rows[0]) : [];
-  const csvRows = [ headers.join(','), ...rows.map(row => headers.map(h => `"${String(row[h] ?? '').replace(/"/g, '""')}"`).join(',')) ];
+  const csvRows = [
+    headers.join(','),
+    ...rows.map(row => headers.map(h => `"${String(row[h] ?? '').replace(/"/g, '""')}"`).join(','))
+  ];
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="study_${studyId}_export.csv"`);
   res.send(csvRows.join('\n'));

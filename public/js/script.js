@@ -361,7 +361,7 @@ function topbarHTML() {
   </div>`;
 }
 function phaseStripHTML() {
-  const hidePhases = ['hero','studySelect','adminLogin','dashboard','register','resume'];
+  const hidePhases = ['hero','studySelect','adminLogin','dashboard','register','resume','certificates'];
   if (hidePhases.includes(S.phase)) return '';
 
   let phases = S.studyConfig?.phases;
@@ -408,6 +408,7 @@ function renderHero() {
     <div class="hero-buttons">
       <button class="btn btn-primary btn-large" id="btnStartParticipation">▶ Start Participation</button>
       <button class="btn btn-secondary btn-large" id="btnResumeExisting">↻ Resume Existing Study</button>
+      <button class="btn btn-secondary btn-large" id="btnMyCertificates">📜 My Certificates</button>
     </div>
     <div id="resumePanel" style="display: none; margin-top: 30px; border-top: 2px solid var(--border); padding-top: 24px;">
       <h3>Resume your study</h3>
@@ -500,6 +501,12 @@ function bindHero() {
     } catch (e) {
       document.getElementById('resumeErr').innerText = e.message;
     }
+  });
+
+  // New: My Certificates button
+  document.getElementById('btnMyCertificates')?.addEventListener('click', () => {
+    S.phase = 'certificates';
+    go();
   });
 }
 function renderResume() {
@@ -1741,25 +1748,29 @@ function bindComplete() {
     window.location.href = window.location.pathname + '?admin=true';
   });
   el('btnDownloadCertPDF')?.addEventListener('click', () => {
-    const certHtml = generateCertificateHTML();
-    const blob = new Blob([certHtml], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `certificate_${S.participantCode}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    alert('Certificate HTML saved. Open it in your browser and print to PDF for a permanent copy.');
-  });
-  el('btnPrintCert')?.addEventListener('click', () => {
-    const win = window.open();
-    win.document.write(generateCertificateHTML());
-    win.document.close();
-    win.focus();
-    win.print();
-  });
+  const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
+  const certHtml = generateCertificateHTML(completionDate);
+  const blob = new Blob([certHtml], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `certificate_${S.participantCode}.html`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  alert('Certificate HTML saved. Open it in your browser and print to PDF for a permanent copy.');
+});
+
+el('btnPrintCert')?.addEventListener('click', () => {
+  const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
+  const certHtml = generateCertificateHTML(completionDate);
+  const win = window.open();
+  win.document.write(certHtml);
+  win.document.close();
+  win.focus();
+  win.print();
+});
   el('btnBackToStudies')?.addEventListener('click', () => {
     S.studyConfig = null;
     S.phase = 'studySelect';
@@ -1869,17 +1880,29 @@ function canStartPostTest() {
   const now = new Date();
   return (now - preDate) / (1000*60*60*24) >= minDays;
 }
-function generateCertificateHTML() {
+function generateCertificateHTML(completionDateOverride) {
   const studyTitle = S.studyConfig?.title_en || 'Computing Education Research Study';
   const participantName = S.participantName || 'Participant';
   const participantCode = S.participantCode || 'N/A';
-  const completionDate = new Date().toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
-  const durationMs = S.metrics?.durationMs || (S.metrics?.startedAt ? Date.now() - S.metrics.startedAt : 0);
-  const durationFormatted = formatDuration(durationMs);
+  
+  // Determine completion date
+  let completionDate;
+  if (completionDateOverride) {
+    completionDate = new Date(completionDateOverride).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
+  } else {
+    const dateFromMetrics = S.metrics?.completedAt || S.metrics?.mainCompletedAt;
+    if (dateFromMetrics) {
+      completionDate = new Date(dateFromMetrics).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
+    } else {
+      completionDate = new Date().toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
+    }
+  }
+
   const ethicsRef = ETHICS_REF;
   const researcherContact = RESEARCHER_CONTACT;
   const verificationData = `${participantCode}|${completionDate}|${S.currentStudyId}`;
   const qrUrl = `https://quickchart.io/qr?text=${encodeURIComponent(verificationData)}&size=200&margin=2`;
+
   return `
     <!DOCTYPE html>
     <html>
@@ -1944,7 +1967,6 @@ function generateCertificateHTML() {
           <p><strong>Participant code:</strong> ${participantCode}</p>
           <p><strong>Email:</strong> ${escapeHtml(S.participantEmail || 'Not provided')}</p>
           <p><strong>Completion date:</strong> ${completionDate}</p>
-          <p><strong>Time spent:</strong> ${durationFormatted}</p>
           <p><strong>Ethics reference:</strong> ${ethicsRef}</p>
         </div>
         <div class="footer">
@@ -1959,6 +1981,150 @@ function generateCertificateHTML() {
     </html>
   `;
 }
+function renderCertificates() {
+  return `${topbarHTML()}<div class="main-card">
+    <h2>📜 Your Certificates</h2>
+    <p>Enter your participant code to view and download certificates for all completed studies.</p>
+    <div class="input-row" style="max-width:300px;">
+      <input type="text" id="certCode" placeholder="Participant code" />
+    </div>
+    <div id="certList" style="margin-top:20px;"></div>
+
+    <div style="margin-top:30px; border-top:1px solid var(--border); padding-top:20px;">
+      <p><strong>Forgot your participant code?</strong> Enter your matric number below and we'll send it to your registered email.</p>
+      <div class="input-row" style="max-width:300px;">
+        <input type="text" id="certMatric" placeholder="Matric number (e.g. NDCS/024/2002)" />
+        <button class="btn btn-secondary" id="btnSendCodeCert">📧 Send my code</button>
+      </div>
+      <div id="certRecoveryStatus" style="margin-top:10px; font-size:0.9rem;"></div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-secondary" id="btnCertBack">← Back</button>
+    </div>
+  </div>`;
+}
+
+async function bindCertificates() {
+  const codeInput = document.getElementById('certCode');
+  const listDiv = document.getElementById('certList');
+  const backBtn = document.getElementById('btnCertBack');
+
+  // --- Code recovery ---
+  const matricInput = document.getElementById('certMatric');
+  const sendBtn = document.getElementById('btnSendCodeCert');
+  const recoveryStatus = document.getElementById('certRecoveryStatus');
+
+  sendBtn?.addEventListener('click', async () => {
+    const matric = matricInput?.value.trim();
+    if (!matric) {
+      recoveryStatus.textContent = 'Please enter your matric number.';
+      recoveryStatus.style.color = 'var(--danger)';
+      return;
+    }
+    recoveryStatus.textContent = 'Sending...';
+    recoveryStatus.style.color = 'var(--text)';
+    try {
+      const result = await apiSendCode(matric);
+      if (result.success) {
+        recoveryStatus.textContent = '✅ Code sent to your registered email address.';
+        recoveryStatus.style.color = 'var(--success)';
+      } else {
+        recoveryStatus.textContent = '❌ Failed to send. Please check your matric and try again.';
+        recoveryStatus.style.color = 'var(--danger)';
+      }
+    } catch (e) {
+      recoveryStatus.textContent = '❌ ' + (e.message || 'Error sending code.');
+      recoveryStatus.style.color = 'var(--danger)';
+    }
+  });
+
+  // --- Back button ---
+  backBtn?.addEventListener('click', () => {
+    S.phase = 'hero';
+    go();
+  });
+
+  // --- Live search for certificates ---
+  codeInput?.addEventListener('input', async () => {
+    const code = codeInput.value.trim().toUpperCase();
+    if (code.length < 5) {
+      listDiv.innerHTML = '';
+      return;
+    }
+    try {
+      const enrolments = await apiGetMyEnrolments(code);
+      const completed = enrolments.filter(e => e.status === 'completed');
+      if (completed.length === 0) {
+        listDiv.innerHTML = '<p>No completed studies found for this code.</p>';
+        return;
+      }
+      listDiv.innerHTML = completed.map(e => {
+        const studyTitle = e.study?.title_en || 'Study';
+        const completedDate = e.completed_at ? new Date(e.completed_at).toLocaleDateString() : 'N/A';
+        return `<div class="cert-item" style="display:flex;justify-content:space-between;align-items:center;padding:12px;border-bottom:1px solid var(--border);">
+          <div><strong>${studyTitle}</strong><br><span style="font-size:0.85rem;color:var(--muted);">Completed: ${completedDate}</span></div>
+          <button class="btn btn-primary btn-sm cert-download" data-enrolment="${e.id}" data-code="${code}">📄 Download Certificate</button>
+        </div>`;
+      }).join('');
+
+      // Bind download buttons
+      document.querySelectorAll('.cert-download').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const enrolId = btn.dataset.enrolment;
+          const code = btn.dataset.code;
+          const enrol = completed.find(e => e.id == enrolId);
+          if (!enrol) return;
+
+          // Temporarily set S to this study's data to reuse generateCertificateHTML
+          const oldConfig = S.studyConfig;
+          const oldMetrics = S.metrics;
+          const oldName = S.participantName;
+          const oldCode = S.participantCode;
+          const oldEmail = S.participantEmail;
+          const oldStudyId = S.currentStudyId;
+
+          S.participantCode = code;
+          S.participantName = enrol.participant?.name || 'Participant';
+          S.participantEmail = enrol.participant?.email || '';
+          S.currentStudyId = enrol.study_id;
+          const config = await apiFetchStudyConfig(enrol.study_id);
+          S.studyConfig = config;
+          S.metrics = enrol.data || {};
+          if (enrol.duration_ms) {
+            S.metrics.durationMs = enrol.duration_ms;
+          } else if (S.metrics.startedAt && enrol.completed_at) {
+            S.metrics.durationMs = new Date(enrol.completed_at) - new Date(S.metrics.startedAt);
+          }
+
+          // const certHtml = generateCertificateHTML();
+          const certHtml = generateCertificateHTML(enrol.completed_at);
+
+          // Restore original state
+          S.studyConfig = oldConfig;
+          S.metrics = oldMetrics;
+          S.participantName = oldName;
+          S.participantCode = oldCode;
+          S.participantEmail = oldEmail;
+          S.currentStudyId = oldStudyId;
+
+          const blob = new Blob([certHtml], { type: 'text/html' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `certificate_${code}_${enrol.study_id}.html`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        });
+      });
+    } catch (e) {
+      listDiv.innerHTML = `<p style="color:var(--danger);">Error: ${e.message}</p>`;
+    }
+  });
+}
+
 // ============================================================
 // MAIN GO FUNCTION
 // ============================================================
@@ -1979,8 +2145,14 @@ async function go() {
     } catch(e) { alert('Could not load study. Please try again.'); S.phase='hero'; go(); return; }
   }
 
-  if (S.phase === 'studySelect' && S.availableStudies.length === 0) {
-    S.availableStudies = await apiFetchStudies();
+  // Refresh enrolments and studies when entering study selection
+  if (S.phase === 'studySelect') {
+    if (S.availableStudies.length === 0) {
+      S.availableStudies = await apiFetchStudies();
+    }
+    if (S.participantCode) {
+      S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
+    }
   }
 
   const needsProgress = ['pre','study','faded','attempt','reflect','code','review','post'];
@@ -2021,18 +2193,16 @@ async function go() {
     case 'adminLogin': html = renderAdminLogin(); break;
     case 'dashboard': html = renderDashboard(); break;
     case 'resume': html = renderResume(); break;
+    case 'certificates': html = renderCertificates(); break;
     default: html = '<div>Error</div>';
   }
   app.innerHTML = html;
   el('btnTheme')?.addEventListener('click',()=>{ toggleTheme(); });
   el('btnAudio')?.addEventListener('click',()=>{ S.audioOn = !S.audioOn; go(); });
-  // "Other studies" button – when inside a study
   el('btnOtherStudies')?.addEventListener('click', async () => {
-    // Refresh enrolments to get the latest list
     if (S.participantCode) {
       S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
     }
-    // Also refresh available studies (in case new ones appeared)
     S.availableStudies = await apiFetchStudies();
     S.phase = 'studySelect';
     go();
@@ -2067,6 +2237,7 @@ async function go() {
     case 'adminLogin': bindAdminLogin(); break;
     case 'dashboard': bindDashboard(); break;
     case 'resume': bindResume(); break;
+    case 'certificates': bindCertificates(); break;
     default: break;
   }
 }
