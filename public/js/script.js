@@ -576,6 +576,14 @@ function bindResume() {
     }
 
     const rs = S._resumeState || S.metrics?._resumeState;
+
+    // --- FIX: If immediate post-test is already done, do not resume into 'post' ---
+    if (S.completedPhases.posttest) {
+      S.phase = 'complete';
+      go();
+      return;
+    }
+
     if (rs) {
       if (rs.phase === 'survey' && S.completedPhases.survey) {
         if (hasPre2) {
@@ -779,11 +787,11 @@ function bindRegister() {
   });
 }
 function renderStudySelect() {
-  // Filter out studies that the participant is already enrolled in (active)
-  const activeStudyIds = S.myEnrolments
-    .filter(e => e.status === 'enrolled' || e.status === 'in_progress')
+  // Exclude all non-withdrawn enrolments (including completed)
+  const enrolledStudyIds = S.myEnrolments
+    .filter(e => e.status !== 'withdrawn')
     .map(e => e.study_id);
-  const availableNotEnrolled = S.availableStudies.filter(study => !activeStudyIds.includes(study.id));
+  const availableNotEnrolled = S.availableStudies.filter(study => !enrolledStudyIds.includes(study.id));
 
   let followupHtml = '';
   const mainStudy = S.myEnrolments.find(e => e.status === 'completed');
@@ -1669,28 +1677,44 @@ function renderDebrief() {
 }
 async function renderComplete() {
   const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
+  const hasDelayedPostTest = S.studyConfig.delayed_post_test_weeks > 0;
+  const followupCompleted = S.metrics?.followupCompleted === true;
+  const followupAvailableAt = S.metrics?.followupAvailableAt ? new Date(S.metrics.followupAvailableAt) : null;
+
+  // --- Survey‑only study (no puzzles) ---
   if (!hasPuzzles && S.completedPhases.survey && !S.completedPhases.puzzles) {
     if (!S.completedSaved) {
-      console.log('Survey-only study complete. Sending completion to server.');
       S.completedSaved = true;
       S.completedPhases.posttest = true;
       saveLocalProgress({ completed: true });
     }
+    return certificatePage();
+  }
+
+  // --- Delayed post‑test is pending ---
+  if (hasDelayedPostTest && !followupCompleted) {
+    let message = '';
+    let buttonHtml = '';
+    if (followupAvailableAt && new Date() >= followupAvailableAt) {
+      message = 'The delayed post‑test is now available.';
+      buttonHtml = `<button class="btn btn-primary" id="btnStartFollowupFromComplete">Start delayed post‑test →</button>`;
+    } else {
+      const daysLeft = followupAvailableAt
+        ? Math.ceil((followupAvailableAt - new Date()) / (1000 * 60 * 60 * 24))
+        : 'soon';
+      message = `The delayed post‑test will be available in ${daysLeft} day(s). Please return later.`;
+    }
     return `${topbarHTML()}<div class="main-card">
-      <div style="text-align:center; padding:20px 0;">
-        <div style="font-size:4rem;">🎓</div>
-        <h2>Participation Complete</h2>
-        <p>Thank you for your participation in this study.</p>
-        <p style="color:var(--muted);">You can download your certificate below.</p>
-        <div class="actions" style="justify-content:center; margin-top:24px;">
-          <button class="btn btn-primary" id="btnDownloadCertPDF">📄 Download Certificate (PDF)</button>
-          <button class="btn btn-secondary" id="btnPrintCert">🖨 Print certificate</button>
-          <button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button>
-        </div>
+      <h2>Study in progress</h2>
+      <p>You have completed the main part of the study. ${message}</p>
+      ${buttonHtml}
+      <div class="actions">
+        <button class="btn btn-secondary" id="btnBackToStudiesFromComplete">📚 Back to Studies</button>
       </div>
     </div>`;
   }
 
+  // --- Post‑test waiting period (min_days_between_pretest_posttest) ---
   if (S.postTestPending && S.completedPhases.puzzles && S.studyConfig?.min_days_between_pretest_posttest > 0) {
     const preDate = new Date(S.metrics.preCompletedAt);
     const now = new Date();
@@ -1706,7 +1730,15 @@ async function renderComplete() {
     </div>`;
   }
 
-  const solved = Object.values(S.metrics?.puzzles||{}).filter(p=>p.completed).length;
+  // --- Completion (no delayed post‑test, or follow‑up already done) ---
+  // Mark as completed if not already done
+  if (!S.completedSaved) {
+    S.completedSaved = true;
+    saveLocalProgress({ completed: true });
+  }
+
+  // Certificate page (existing code)
+  const solved = Object.values(S.metrics?.puzzles || {}).filter(p => p.completed).length;
   let peerHtml = '';
   if (API_BASE !== undefined && S.currentStudyId) {
     const data = await apiAverageGain(S.currentStudyId);
@@ -1716,20 +1748,25 @@ async function renderComplete() {
       peerHtml = `<div class="example-box" style="margin-top:14px">📊 Class average learning gain: ${data.averageGain.toFixed(1)}%. ${diff > 0 ? 'You did better than average! 🎉' : diff < 0 ? 'Keep practising – you can improve!' : 'You are on par with your peers.'}</div>`;
     }
   }
-  let followupStatus = '';
-  if (S.metrics && S.metrics.mainCompletedAt && !S.metrics.followupCompleted) {
-    const availableAt = new Date(S.metrics.followupAvailableAt);
-    if (new Date() >= availableAt) { followupStatus = `<div class="example-box" style="margin-top:14px;background:#e0f2fe">📋 The delayed post‑test is now available. Return to the study selection screen to take it.</div>`; }
-    else { const daysLeft = Math.ceil((availableAt - new Date()) / (1000 * 60 * 60 * 24)); followupStatus = `<div class="example-box" style="margin-top:14px">⏳ The delayed post‑test will be available in ${daysLeft} days. You will be notified when ready.</div>`; }
-  } else if (S.metrics && S.metrics.followupCompleted) { followupStatus = `<div class="example-box" style="margin-top:14px">✅ You have completed the delayed post‑test. Thank you for your participation!</div>`; }
 
-  if (!S.completedSaved) {
-    console.log('Puzzle-based study complete. Sending completion to server.');
-    S.completedSaved = true;
-    saveLocalProgress({ completed: true });
-  }
+  return `${topbarHTML()}<div class="main-card"><div class="score-hero"><div class="score-big">${solved}/${S.studyConfig.puzzles.length}</div><p>puzzles solved</p></div>${peerHtml}<div class="actions"><button class="btn btn-secondary" id="btnViewDash">📊 Dashboard</button><button class="btn btn-primary" id="btnDownloadCertPDF">📄 Download Certificate (PDF)</button><button class="btn btn-secondary" id="btnPrintCert">🖨 Print certificate</button><button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button></div></div>`;
+}
 
-  return `${topbarHTML()}<div class="main-card"><div class="score-hero"><div class="score-big">${solved}/${S.studyConfig.puzzles.length}</div><p>puzzles solved</p></div>${peerHtml}${followupStatus}<div class="actions"><button class="btn btn-secondary" id="btnViewDash">📊 Dashboard</button><button class="btn btn-primary" id="btnDownloadCertPDF">📄 Download Certificate (PDF)</button><button class="btn btn-secondary" id="btnPrintCert">🖨 Print certificate</button><button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button></div></div>`;
+// Helper for survey‑only certificate (kept for clarity)
+function certificatePage() {
+  return `${topbarHTML()}<div class="main-card">
+    <div style="text-align:center; padding:20px 0;">
+      <div style="font-size:4rem;">🎓</div>
+      <h2>Participation Complete</h2>
+      <p>Thank you for your participation in this study.</p>
+      <p style="color:var(--muted);">You can download your certificate below.</p>
+      <div class="actions" style="justify-content:center; margin-top:24px;">
+        <button class="btn btn-primary" id="btnDownloadCertPDF">📄 Download Certificate (PDF)</button>
+        <button class="btn btn-secondary" id="btnPrintCert">🖨 Print certificate</button>
+        <button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 function bindDebrief() {
@@ -1747,33 +1784,57 @@ function bindComplete() {
   el('btnViewDash')?.addEventListener('click', () => {
     window.location.href = window.location.pathname + '?admin=true';
   });
+
   el('btnDownloadCertPDF')?.addEventListener('click', () => {
-  const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
-  const certHtml = generateCertificateHTML(completionDate);
-  const blob = new Blob([certHtml], { type: 'text/html' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `certificate_${S.participantCode}.html`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  alert('Certificate HTML saved. Open it in your browser and print to PDF for a permanent copy.');
+    const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
+    const certHtml = generateCertificateHTML(completionDate);
+    const blob = new Blob([certHtml], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `certificate_${S.participantCode}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert('Certificate HTML saved. Open it in your browser and print to PDF for a permanent copy.');
+  });
+
+  el('btnPrintCert')?.addEventListener('click', () => {
+    const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
+    const certHtml = generateCertificateHTML(completionDate);
+    const win = window.open();
+    win.document.write(certHtml);
+    win.document.close();
+    win.focus();
+    win.print();
+  });
+
+  // For both certificate and waiting page back buttons
+el('btnBackToStudies')?.addEventListener('click', async () => {
+  if (S.participantCode) {
+    S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
+  }
+  S.studyConfig = null;
+  S.phase = 'studySelect';
+  go();
 });
 
-el('btnPrintCert')?.addEventListener('click', () => {
-  const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
-  const certHtml = generateCertificateHTML(completionDate);
-  const win = window.open();
-  win.document.write(certHtml);
-  win.document.close();
-  win.focus();
-  win.print();
+el('btnBackToStudiesFromComplete')?.addEventListener('click', async () => {
+  if (S.participantCode) {
+    S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
+  }
+  S.studyConfig = null;
+  S.phase = 'studySelect';
+  go();
 });
-  el('btnBackToStudies')?.addEventListener('click', () => {
-    S.studyConfig = null;
-    S.phase = 'studySelect';
+
+  // Start delayed post‑test from the waiting page
+  el('btnStartFollowupFromComplete')?.addEventListener('click', () => {
+    S.assMode = 'post';
+    S.assQ = 0;
+    S.assAnswers = [];
+    S.phase = 'followup';
     go();
   });
 }

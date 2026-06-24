@@ -489,7 +489,11 @@ app.post('/api/progress/:enrolmentId', async (req, res) => {
   const { data: enrolment, error } = await sb.from('enrolments').select('*, study:study_id(*)').eq('id', enrolmentId).single();
   if (error) return res.status(404).json({ error: 'Enrolment not found' });
   const study = enrolment.study;
-  if (study.status !== 'open' && enrolment.status !== 'withdrawn') return res.status(403).json({ error: 'Study is closed – no further progress accepted' });
+  
+  // Allow completion updates even when study is closed; block all other updates if not open
+  if (study.status !== 'open' && !progressData.completed && enrolment.status !== 'withdrawn') {
+    return res.status(403).json({ error: 'Study is closed – no further progress accepted' });
+  }
   if (enrolment.status === 'withdrawn') return res.status(403).json({ error: 'Participant has withdrawn' });
 
   let newStatus = enrolment.status;
