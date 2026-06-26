@@ -125,6 +125,46 @@ function getProgrammeType(matric) {
   return 'other';
 }
 
+let _completionSyncDone = false;
+function getLocalProgressForEnrolment(enrolmentId, participantCode) {
+  const key = `research_${participantCode}_${enrolmentId}`;
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function syncCompletionStatus() {
+  if (!S.participantCode || !S.myEnrolments) return;
+
+  let updated = false;
+  for (const enrol of S.myEnrolments) {
+    if (enrol.status === 'completed') continue;
+    const local = getLocalProgressForEnrolment(enrol.id, S.participantCode);
+    if (local && local.completed === true) {
+      try {
+        await fetch(`${API_BASE}/api/progress/${enrol.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(local)
+        });
+        // Update the local status in the array so the UI reflects it immediately
+        enrol.status = 'completed';
+        updated = true;
+        console.log(`Synced completion for enrolment ${enrol.id}`);
+      } catch (e) {
+        console.warn(`Failed to sync completion for enrolment ${enrol.id}`, e);
+      }
+    }
+  }
+  // Optionally, re‑fetch enrolments to be fully in sync (but we already updated the array)
+  if (updated) {
+    // You can call apiGetMyEnrolments again if you want server‑side changes,
+    // but updating the local array is enough for the UI.
+  }
+}
 // ============================================================
 // LOCALSTORAGE KEYS
 // ============================================================
@@ -341,9 +381,10 @@ function topbarHTML() {
 
   // Determine if there are any other unenrolled studies (for "Other studies" button)
   const hasOtherStudies = S.availableStudies.some(study => 
-    !S.myEnrolments.some(e => e.study_id === study.id && (e.status === 'enrolled' || e.status === 'in_progress'))
-  );
-  
+  !S.myEnrolments.some(e => e.study_id === study.id && 
+    (e.status === 'enrolled' || e.status === 'in_progress' || e.status === 'completed')
+  )
+);
   return `<div class="topbar">
     <div class="brand">
       <h1>🔬 Research Portal</h1>
@@ -1383,24 +1424,66 @@ function renderAssessmentDynamic(mode) {
     const daysLeft = Math.ceil((preDate.getTime() + minDays * 24*60*60*1000 - now.getTime()) / (24*60*60*1000));
     return `<div class="main-card"><h2>Post‑test not yet available</h2><p>The post‑test will be available after ${minDays} day(s). Please return in ${daysLeft} day(s).</p><div class="actions"><button class="btn btn-primary" id="btnBackToStudies">← Back to studies</button></div></div>`;
   }
+
   const qs = mode === 'pre' ? S.studyConfig.preQ : S.studyConfig.postQ;
-  if(!qs || !qs.length) return `<div class="main-card">No questions</div>`;
+  if (!qs || !qs.length) return `<div class="main-card">No questions</div>`;
   const q = qs[S.assQ];
   const isAnswered = S.assAnswers[S.assQ] !== undefined;
   const chosen = S.assAnswers[S.assQ];
   const isPost = mode === 'post';
-  return `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><div class="prog-wrap"><div class="prog-row"><span>${mode==='pre'?'Pre‑test':'Post‑test'} – Question ${S.assQ+1}/${qs.length}</span></div><div class="prog-bar"><div class="prog-fill" style="width:${((S.assQ+1)/qs.length)*100}%"></div></div></div><div class="q-wrap"><p class="q-text">${L(q,'q')}</p>${(L(q,'opts')).map((opt,i)=>{ let extra=''; if(isAnswered && (isPost || q.isAttention)) { if(i===q.correct) extra=' correct-ans'; else if(i===chosen && chosen!==q.correct) extra=' wrong-ans'; } else if(i===chosen) extra=' selected'; return `<button class="option-btn${extra}" data-idx="${i}" ${isAnswered?'disabled':''}>${'ABCD'[i]}. ${opt}</button>`; }).join('')}</div><div class="actions">${isAnswered ? `<button class="btn btn-primary" id="btnAssNext">${S.assQ<qs.length-1?'Next →':'Finish →'}</button>` : ''}</div></div>`;
+  const total = qs.length;
+
+  // Format question text with preserved whitespace
+  const questionHtml = q.q_en || q.q || '';
+  // We'll put it inside <pre> to preserve line breaks and indentation
+  // Also add a monospace class for code snippets
+  const formattedQuestion = `<pre class="question-code">${escapeHtml(questionHtml)}</pre>`;
+
+  return `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
+    <div class="prog-wrap">
+      <div class="prog-row">
+        <span>${mode === 'pre' ? 'Pre‑test' : 'Post‑test'} – Question ${S.assQ+1}/${total}</span>
+      </div>
+      <div class="prog-bar"><div class="prog-fill" style="width:${((S.assQ+1)/total)*100}%"></div></div>
+    </div>
+    <div class="q-wrap">
+      <div class="q-text">${formattedQuestion}</div>
+      ${(L(q,'opts')).map((opt,i) => {
+        let extra = '';
+        if (isAnswered && (isPost || q.isAttention)) {
+          if (i === q.correct) extra = ' correct-ans';
+          else if (i === chosen && chosen !== q.correct) extra = ' wrong-ans';
+        } else if (i === chosen) extra = ' selected';
+        return `<button class="option-btn${extra}" data-idx="${i}" ${isAnswered ? 'disabled' : ''}>${'ABCD'[i]}. ${opt}</button>`;
+      }).join('')}
+    </div>
+    <div class="actions" style="justify-content: space-between;">
+      ${S.assQ > 0 ? `<button class="btn btn-secondary" id="btnAssPrev">← Previous</button>` : ''}
+      ${isAnswered ? `<button class="btn btn-primary" id="btnAssNext">${S.assQ < total-1 ? 'Next →' : 'Finish →'}</button>` : ''}
+    </div>
+  </div>`;
 }
 function bindAssessmentDynamic(mode) {
-  document.querySelectorAll('.option-btn:not([disabled])').forEach(btn => { btn.onclick = () => { S.assAnswers[S.assQ] = parseInt(btn.dataset.idx); saveLocalProgress(); go(); }; });
+  // Answer selection
+  document.querySelectorAll('.option-btn:not([disabled])').forEach(btn => {
+    btn.onclick = () => {
+      S.assAnswers[S.assQ] = parseInt(btn.dataset.idx);
+      saveLocalProgress();
+      go();
+    };
+  });
+
+  // Next button
   el('btnAssNext')?.addEventListener('click', () => {
     const qs = mode === 'pre' ? S.studyConfig.preQ : S.studyConfig.postQ;
-    if(S.assQ < qs.length-1) { S.assQ++; go(); }
-    else {
-      const scorable = qs.filter(q=>!q.isAttention);
-      const total = Math.round((scorable.filter((q,i)=>S.assAnswers[qs.indexOf(q)]===q.correct).length / scorable.length)*100);
-      if(!S.metrics) S.metrics = { puzzles: {} };
-      if(mode === 'pre') {
+    if (S.assQ < qs.length - 1) {
+      S.assQ++;
+      go();
+    } else {
+      const scorable = qs.filter(q => !q.isAttention);
+      const total = Math.round((scorable.filter((q, i) => S.assAnswers[qs.indexOf(q)] === q.correct).length / scorable.length) * 100);
+      if (!S.metrics) S.metrics = { puzzles: {} };
+      if (mode === 'pre') {
         S.completedPhases.pretest = true;
         S.metrics.preScore = total;
         S.metrics.preCompletedAt = new Date().toISOString();
@@ -1426,6 +1509,14 @@ function bindAssessmentDynamic(mode) {
         S.phase = 'debrief';
         go();
       }
+    }
+  });
+
+  // Previous button
+  el('btnAssPrev')?.addEventListener('click', () => {
+    if (S.assQ > 0) {
+      S.assQ--;
+      go();
     }
   });
 }
@@ -2208,13 +2299,14 @@ async function go() {
 
   // Refresh enrolments and studies when entering study selection
   if (S.phase === 'studySelect') {
-    if (S.availableStudies.length === 0) {
-      S.availableStudies = await apiFetchStudies();
-    }
-    if (S.participantCode) {
-      S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
-    }
+  if (S.availableStudies.length === 0) {
+    S.availableStudies = await apiFetchStudies();
   }
+  if (S.participantCode) {
+    S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
+    await syncCompletionStatus();   // <-- this now runs every time
+  }
+}
 
   const needsProgress = ['pre','study','faded','attempt','reflect','code','review','post'];
   if (needsProgress.includes(S.phase)) {
