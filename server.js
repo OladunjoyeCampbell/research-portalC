@@ -662,6 +662,7 @@ app.post('/api/admin/send-reminders', requireAdmin, async (req, res) => {
   res.json({ total: inactive.length, results });
 });
 
+
 // CATCH-ALL: serve index.html for client-side routing
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'API not found' });

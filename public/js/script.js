@@ -339,6 +339,17 @@ async function apiSendCode(matric) {
   return res.json();
 }
 
+async function apiUpdateStudyConfig(studyId, config) {
+  const res = await fetch(`${API_BASE}/api/admin/study/${studyId}/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ config })
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // ============================================================
 // TIMEOUT
 // ============================================================
@@ -1937,7 +1948,25 @@ function bindAdminLogin() {
   el('btnLoginCancel')?.addEventListener('click', () => { window.history.replaceState({}, '', window.location.pathname); S.phase = 'hero'; go(); });
 }
 function renderDashboard() {
-  return `${topbarHTML()}<div class="main-card"><h2>📊 Researcher Dashboard</h2><p>Select a study to manage.</p><div id="studySelector" style="margin-bottom:20px"><select id="adminStudySelect" style="width:100%;padding:10px;border-radius:12px;border:1.5px solid var(--border)"><option value="">-- Loading studies --</option></select></div><div id="portalMgmtPanel" class="portal-status-placeholder" style="margin-bottom:20px">Loading...</div><div class="dash-grid" id="statsGrid" style="margin-bottom:20px"><div class="stat-card"><div class="stat-num">—</div><div class="stat-label">Enrolled</div></div><div class="stat-card"><div class="stat-num">—</div><div class="stat-label">In progress</div></div><div class="stat-card"><div class="stat-num">—</div><div class="stat-label">Completed</div></div><div class="stat-card"><div class="stat-num">—</div><div class="stat-label">Spaces left</div></div></div><div class="actions"><button class="btn btn-secondary" id="btnExportCSV">📊 Export CSV</button><button class="btn btn-secondary" id="btnExportJSON">📥 Export JSON</button><button class="btn btn-secondary" id="btnClearLocalData">🗑 Clear local data</button><button class="btn btn-primary" id="btnDashBack">← Back to portal</button></div></div>`;
+  return `${topbarHTML()}<div class="main-card">
+    <h2>📊 Researcher Dashboard</h2>
+    <p>Select a study to manage.</p>
+    <div id="studySelector" style="margin-bottom:20px">
+      <select id="adminStudySelect" style="width:100%;padding:10px;border-radius:12px;border:1.5px solid var(--border)">
+        <option value="">-- Loading studies --</option>
+      </select>
+    </div>
+    <div id="portalMgmtPanel" class="portal-status-placeholder" style="margin-bottom:20px">Loading...</div>
+    <div class="dash-grid" id="statsGrid" style="margin-bottom:20px">...</div>
+    <div class="actions">
+      <button class="btn btn-secondary" id="btnExportCSV">📊 Export CSV</button>
+      <button class="btn btn-secondary" id="btnExportJSON">📥 Export JSON</button>
+      <!-- Removed Edit Survey Fields -->
+      <button class="btn btn-secondary" id="btnClearLocalData">🗑 Clear local data</button>
+      <button class="btn btn-primary" id="btnDashBack">← Back to portal</button>
+    </div>
+    <!-- Removed configEditorContainer -->
+  </div>`;
 }
 function bindDashboard() {
   let currentStudyId = null;
@@ -1990,14 +2019,8 @@ function bindDashboard() {
   el('btnDashBack')?.addEventListener('click', () => { S.isAdminMode = false; S.phase = 'hero'; go(); });
   loadStudies();
 }
-function renderFollowupDynamic() {
-  const qs = S.studyConfig.postQ;
-  if (!qs || !qs.length) return `<div class="main-card">No follow‑up questions</div>`;
-  const q = qs[S.assQ];
-  const isAnswered = S.assAnswers[S.assQ] !== undefined;
-  const chosen = S.assAnswers[S.assQ];
-  return `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><div class="prog-wrap"><div class="prog-row"><span>Delayed Post‑test – Question ${S.assQ+1}/${qs.length}</span></div><div class="prog-bar"><div class="prog-fill" style="width:${((S.assQ+1)/qs.length)*100}%"></div></div></div><div class="q-wrap"><p class="q-text">${L(q,'q')}</p>${(L(q,'opts')).map((opt,i)=>{ let extra=''; if(isAnswered) { if(i===q.correct) extra=' correct-ans'; else if(i===chosen && chosen!==q.correct) extra=' wrong-ans'; } else if(i===chosen) extra=' selected'; return `<button class="option-btn${extra}" data-idx="${i}" ${isAnswered?'disabled':''}>${'ABCD'[i]}. ${opt}</button>`; }).join('')}</div><div class="actions">${isAnswered ? `<button class="btn btn-primary" id="btnFollowupNext">${S.assQ<qs.length-1?'Next →':'Finish →'}</button>` : ''}</div></div>`;
-}
+
+
 function bindFollowupDynamic() {
   document.querySelectorAll('.option-btn:not([disabled])').forEach(btn => { btn.onclick = () => { S.assAnswers[S.assQ] = parseInt(btn.dataset.idx); saveLocalProgress(); go(); }; });
   el('btnFollowupNext')?.addEventListener('click', () => {
