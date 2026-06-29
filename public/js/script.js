@@ -38,6 +38,8 @@ let S = {
   currentStudyId: null,
   randomisationGroup: null,
   studyConfig: null,
+  postSurveyAnswers: {},   // stores answers for the post‑survey
+  reflectionWeek: 0,       // 0‑based index of the current weekly reflection
   puzzleIdx: 0,
   available: [], userSeq: [], fadedLocked: [],
   assQ: 0, assAnswers: [], assMode: 'pre',
@@ -59,7 +61,8 @@ let S = {
     pretest: false,
     puzzles: false,
     posttest: false,
-    followup: false
+    followup: false,
+    postSurvey: false   // <-- new 
   },
   puzzlesCompletedCount: 0,
   totalPuzzles: 0,
@@ -118,6 +121,16 @@ function escapeHtml(str) {
   if (!str) return '';
   return str.replace(/[&<>]/g, m => m === '&' ? '&amp;' : m === '<' ? '&lt;' : '&gt;');
 }
+// ============================================================
+// DATE FORMATTING (for Nigerian participants)
+// ============================================================
+function formatDateDDMMYYYY(date) {
+  if (!(date instanceof Date) || isNaN(date)) return 'N/A';
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
 function getProgrammeType(matric) {
   const prefix = (matric || '').split('/')[0].toUpperCase();
   if (prefix.startsWith('HND')) return 'hnd';
@@ -165,6 +178,30 @@ async function syncCompletionStatus() {
     // but updating the local array is enough for the UI.
   }
 }
+
+function isReflectionAvailable(idx) {
+  const startDate = new Date(S.metrics?.reflectionStartDate || Date.now());
+  const daysCumulative = S.studyConfig?.reflectionDays || [];
+  let cumulative = 0;
+  for (let i = 0; i <= idx; i++) {
+    cumulative += daysCumulative[i] || 0;
+  }
+  const availableDate = new Date(startDate);
+  availableDate.setDate(availableDate.getDate() + cumulative);
+  return new Date() >= availableDate;
+}
+
+function getReflectionAvailableDate(idx) {
+  const startDate = new Date(S.metrics?.reflectionStartDate || Date.now());
+  const daysCumulative = S.studyConfig?.reflectionDays || [];
+  let cumulative = 0;
+  for (let i = 0; i <= idx; i++) {
+    cumulative += daysCumulative[i] || 0;
+  }
+  const availableDate = new Date(startDate);
+  availableDate.setDate(availableDate.getDate() + cumulative);
+  return availableDate;
+}
 // ============================================================
 // LOCALSTORAGE KEYS
 // ============================================================
@@ -182,6 +219,7 @@ function saveLocalProgress(overrides = {}) {
     assAnswers: [...(S.assAnswers || [])],
     assMode: S.assMode,
     surveyAnswers: { ...S.surveyAnswers },
+    postSurveyAnswers: { ...S.postSurveyAnswers },
     metrics: JSON.parse(JSON.stringify(S.metrics)),
     reviewQueue: [...(S.reviewQueue || [])],
     reviewIdx: S.reviewIdx,
@@ -198,10 +236,11 @@ function saveLocalProgress(overrides = {}) {
     audioOn: S.audioOn,
     participantEmail: S.participantEmail,
     participantGender: S.participantGender,
-    completedPhases: { ...S.completedPhases },
+    completedPhases: { ...S.completedPhases },   // includes postSurvey
     puzzlesCompletedCount: S.puzzlesCompletedCount,
     totalPuzzles: S.totalPuzzles,
     postTestPending: S.postTestPending,
+    reflectionWeek: S.reflectionWeek,
     _resumeState: {
       phase: S.phase,
       puzzleIdx: S.puzzleIdx,
@@ -209,17 +248,19 @@ function saveLocalProgress(overrides = {}) {
       assAnswers: [...(S.assAnswers || [])],
       assMode: S.assMode,
       surveyAnswers: { ...S.surveyAnswers },
+      postSurveyAnswers: { ...S.postSurveyAnswers },   // new
       reviewQueue: [...(S.reviewQueue || [])],
       reviewIdx: S.reviewIdx,
       available: S.available ? [...S.available] : [],
       userSeq: S.userSeq ? [...S.userSeq] : [],
       fadedLocked: [...(S.fadedLocked || [])],
       currentEnrolmentId: S.currentEnrolmentId,
-      currentStudyId: S.currentStudyId
+      currentStudyId: S.currentStudyId,
+      reflectionWeek: S.reflectionWeek,                // new
+      completedPhases: { ...S.completedPhases }        // new
     }
   };
 
-  // Apply overrides (e.g., { completed: true })
   if (overrides.completed) toStore.completed = true;
 
   localStorage.setItem(getStorageKey(), JSON.stringify(toStore));
@@ -239,16 +280,58 @@ function loadLocalProgress() {
     Object.assign(S, saved);
     S.metrics = saved.metrics || { puzzles: {} };
     S.surveyAnswers = saved.surveyAnswers || {};
+    S.postSurveyAnswers = saved.postSurveyAnswers || {};
     S.assAnswers = saved.assAnswers || [];
-    S.completedPhases = saved.completedPhases || { survey: false, pretest: false, puzzles: false, posttest: false, followup: false };
+    S.completedPhases = saved.completedPhases || { 
+      survey: false, pretest: false, puzzles: false, posttest: false, followup: false, postSurvey: false 
+    };
+    // Ensure the new flag exists even if old data doesn't have it
+    if (S.completedPhases.postSurvey === undefined) {
+      S.completedPhases.postSurvey = false;
+    }
     S.puzzlesCompletedCount = saved.puzzlesCompletedCount || 0;
     S.totalPuzzles = saved.totalPuzzles || (S.studyConfig?.puzzles?.length || 0);
     S.postTestPending = saved.postTestPending || false;
     S.gradeConsent = saved.gradeConsent || false;
+    S.reflectionWeek = saved.reflectionWeek || 0;
     return saved;
   } catch(e) { console.warn('Failed to parse saved progress', e); return null; }
 }
 
+async function patchEnrolmentStatus(enrolments) {
+  const patched = [];
+  for (const enrol of enrolments) {
+    if (enrol.status === 'completed') {
+      const config = await apiFetchStudyConfig(enrol.study_id);
+      if (config) {
+        const hasReflections = config.reflections && config.reflections.length > 0;
+        const hasPostSurvey = config.postSurveyFields && config.postSurveyFields.length > 0;
+        if (hasReflections || hasPostSurvey) {
+          let progress = null;
+          const local = loadLocalProgress ? loadLocalProgress() : null;
+          if (local) {
+            progress = local;
+          } else {
+            const remote = await apiLoadProgress(enrol.id);
+            if (remote?.progress) progress = remote.progress;
+          }
+          if (progress) {
+            const reflectionsDone = progress.metrics?.reflections ? progress.metrics.reflections.length : 0;
+            const totalReflections = config.reflections ? config.reflections.length : 0;
+            const postSurveyDone = progress.completedPhases?.postSurvey || false;
+            if (reflectionsDone < totalReflections || !postSurveyDone) {
+              const patchedEnrol = { ...enrol, status: 'in_progress' };
+              patched.push(patchedEnrol);
+              continue;
+            }
+          }
+        }
+      }
+    }
+    patched.push(enrol);
+  }
+  return patched;
+}
 // ============================================================
 // API CALLS
 // ============================================================
@@ -500,22 +583,62 @@ function bindHero() {
       return;
     }
     try {
-      const enrolments = await apiGetMyEnrolments(code);
+      // ── 1. Fetch enrolments ──
+      let enrolments = await apiGetMyEnrolments(code);
       if (!enrolments.length) throw new Error('No enrolments found for this code');
-      
+
+      // ── 2. PATCH: Show studies with pending reflections/post‑survey as in_progress ──
+      const patchedEnrolments = [];
+      for (const enrol of enrolments) {
+        if (enrol.status === 'completed') {
+          const config = await apiFetchStudyConfig(enrol.study_id);
+          if (config) {
+            const hasReflections = config.reflections && config.reflections.length > 0;
+            const hasPostSurvey = config.postSurveyFields && config.postSurveyFields.length > 0;
+            if (hasReflections || hasPostSurvey) {
+              let progress = null;
+              const local = loadLocalProgress ? loadLocalProgress() : null;
+              if (local) {
+                progress = local;
+              } else {
+                const remote = await apiLoadProgress(enrol.id);
+                if (remote?.progress) progress = remote.progress;
+              }
+              if (progress) {
+                const reflectionsDone = progress.metrics?.reflections ? progress.metrics.reflections.length : 0;
+                const totalReflections = config.reflections ? config.reflections.length : 0;
+                const postSurveyDone = progress.completedPhases?.postSurvey || false;
+                if (reflectionsDone < totalReflections || !postSurveyDone) {
+                  const patched = { ...enrol, status: 'in_progress' };
+                  patchedEnrolments.push(patched);
+                  continue;
+                }
+              }
+            }
+          }
+        }
+        patchedEnrolments.push(enrol);
+      }
+      enrolments = patchedEnrolments;
+
+      // ── 3. Filter active (enrolled or in_progress) ──
       const active = enrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
       if (active.length === 0) {
         document.getElementById('resumeErr').innerText = 'You have no studies in progress. All are completed or withdrawn.';
         return;
       }
 
+      // ── 4. Set participant details ──
       const participant = active[0].participant || {};
       S.participantCode = code;
       S.participantName = participant.name || 'Participant';
       S.participantMatric = participant.matric || '';
       S.participantEmail = participant.email || '';
       S.participantGender = participant.gender || '';
+      S.participantInstitution = participant.institution || '';
+      S.participantProgramme = participant.programme || '';
 
+      // ── 5. Handle multiple active studies ──
       if (active.length > 1) {
         S.resumeCandidates = active;
         S.phase = 'resumeSelect';
@@ -523,6 +646,7 @@ function bindHero() {
         return;
       }
 
+      // ── 6. Single active study – proceed ──
       const enrol = active[0];
       const config = await apiFetchStudyConfig(enrol.study_id);
       if (!config || !config.puzzles) throw new Error('Study configuration missing');
@@ -541,7 +665,10 @@ function bindHero() {
       const hasPre = config.preQ && config.preQ.length > 0;
       const hasPost = config.postQ && config.postQ.length > 0;
       const hasPuzzles = config.puzzles && config.puzzles.length > 0;
-      const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles;
+      const hasReflections = config.reflections && config.reflections.length > 0;
+      const hasPostSurvey = config.postSurveyFields && config.postSurveyFields.length > 0;
+      const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey;
+
       if (isSurveyOnly && S.completedPhases.survey) {
         S.phase = 'complete';
         go();
@@ -563,34 +690,82 @@ function bindHero() {
 }
 function renderResume() {
   const m = S.metrics || {};
-  const solved = Object.values(m.puzzles || {}).filter(p => p.completed).length;
-  const guided = Object.values(m.puzzles || {}).filter(p => p.guided).length;
-  const preScore = (m.preScore !== undefined && m.preScore !== null) ? `${m.preScore}%` : '—';
-  const totalPuzzles = S.totalPuzzles || S.studyConfig?.puzzles?.length || 0;
-  const totalElapsed = m.startedAt ? (Date.now() - m.startedAt) : 0;
-  const elapsedFormatted = formatElapsedTime(totalElapsed);
   const displayName = (S.participantName && S.participantName.trim() !== '') ? S.participantName : 'Participant';
-  return `${topbarHTML()}<div class="main-card"><h2>👋 Welcome back, ${escapeHtml(displayName)}</h2>
-    <div class="pcode-box"><p>Your participant code:</p><div class="pcode-num">${S.participantCode}</div></div>
-    <div class="resume-grid">
+
+  // ── Determine study type ──
+  const hasPuzzles = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
+  const hasReflections = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
+  const hasPostSurvey = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
+
+  // ── Build resume stats ──
+  let statsHtml = '';
+
+  if (hasPuzzles) {
+    // Original puzzle-based study stats
+    const solved = Object.values(m.puzzles || {}).filter(p => p.completed).length;
+    const guided = Object.values(m.puzzles || {}).filter(p => p.guided).length;
+    const preScore = (m.preScore !== undefined && m.preScore !== null) ? `${m.preScore}%` : '—';
+    const totalPuzzles = S.totalPuzzles || S.studyConfig?.puzzles?.length || 0;
+    const totalElapsed = m.startedAt ? (Date.now() - m.startedAt) : 0;
+    const elapsedFormatted = formatElapsedTime(totalElapsed);
+
+    statsHtml = `
       <div class="resume-stat"><div class="rnum">${solved}/${totalPuzzles}</div><div class="rlbl">Puzzles solved</div></div>
       <div class="resume-stat"><div class="rnum">${guided}</div><div class="rlbl">Needed guidance</div></div>
       <div class="resume-stat"><div class="rnum">${preScore}</div><div class="rlbl">Pre-test %</div></div>
       <div class="resume-stat"><div class="rnum">${elapsedFormatted}</div><div class="rlbl">Time since you started</div></div>
-    </div>
+    `;
+  } else {
+    // For studies without puzzles (e.g., Study 3)
+    const preSurveyDone = S.completedPhases.survey ? '✅' : '⬜';
+    const reflectionsDone = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+    const totalReflections = hasReflections ? S.studyConfig.reflections.length : 0;
+    const postSurveyDone = S.completedPhases.postSurvey ? '✅' : '⬜';
+
+    statsHtml = `
+      <div class="resume-stat"><div class="rnum">${preSurveyDone}</div><div class="rlbl">Pre‑survey</div></div>
+      ${hasReflections ? `<div class="resume-stat"><div class="rnum">${reflectionsDone}/${totalReflections}</div><div class="rlbl">Reflections completed</div></div>` : ''}
+      ${hasPostSurvey ? `<div class="resume-stat"><div class="rnum">${postSurveyDone}</div><div class="rlbl">Post‑survey</div></div>` : ''}
+    `;
+  }
+
+  return `${topbarHTML()}<div class="main-card"><h2>👋 Welcome back, ${escapeHtml(displayName)}</h2>
+    <div class="pcode-box"><p>Your participant code:</p><div class="pcode-num">${S.participantCode}</div></div>
+    <div class="resume-grid">${statsHtml}</div>
     <div class="example-box">Pick up exactly where you left off.</div>
     <div class="actions"><button class="btn btn-primary" id="btnResumeContinue">▶ Resume</button>
     <button class="btn btn-secondary" id="btnResumeRestart">↺ Start fresh</button></div></div>`;
 }
 function bindResume() {
+  // If config is missing, reload it
+  if (!S.studyConfig) {
+    console.warn('bindResume: studyConfig missing, reloading...');
+    apiFetchStudyConfig(S.currentStudyId).then(cfg => {
+      if (cfg) {
+        S.studyConfig = cfg;
+        go();
+      } else {
+        S.phase = 'studySelect';
+        go();
+      }
+    });
+    return;
+  }
   const continueBtn = document.getElementById('btnResumeContinue');
   const restartBtn = document.getElementById('btnResumeRestart');
 
+  // ── Determine study type (including reflections & post‑survey) ──
   const hasPre = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
   const hasPost = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
   const hasPuzzles = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
-  const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles;
+  const hasReflections = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
+  const hasPostSurvey = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
 
+  const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey;
+
+  console.log('bindResume init: hasReflections =', hasReflections, 'hasPostSurvey =', hasPostSurvey);
+
+  // ── Handle truly survey‑only studies ──
   if (isSurveyOnly) {
     if (S.completedPhases.survey) {
       S.phase = 'complete';
@@ -603,17 +778,24 @@ function bindResume() {
     }
   }
 
+  // ── Handle delayed post‑test waiting ──
   if (S.postTestPending) {
     S.phase = 'complete';
     go();
     return;
   }
 
+  // ── Continue button logic ──
   continueBtn?.addEventListener('click', () => {
     const hasPre2 = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
     const hasPost2 = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
     const hasPuzzles2 = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
-    const isSurveyOnly2 = !hasPre2 && !hasPost2 && !hasPuzzles2;
+    const hasReflections2 = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
+    const hasPostSurvey2 = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
+
+    const isSurveyOnly2 = !hasPre2 && !hasPost2 && !hasPuzzles2 && !hasReflections2 && !hasPostSurvey2;
+
+    console.log('continueBtn: hasReflections2 =', hasReflections2, 'hasPostSurvey2 =', hasPostSurvey2);
 
     if (isSurveyOnly2) {
       if (S.completedPhases.survey) {
@@ -629,8 +811,22 @@ function bindResume() {
 
     const rs = S._resumeState || S.metrics?._resumeState;
 
-    // --- FIX: If immediate post-test is already done, do not resume into 'post' ---
+    // If immediate post‑test is already done, check for pending reflections/post‑survey
     if (S.completedPhases.posttest) {
+      if (hasReflections2 || hasPostSurvey2) {
+        const reflectionsDone = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+        const totalReflections = S.studyConfig?.reflections ? S.studyConfig.reflections.length : 0;
+        if (reflectionsDone < totalReflections) {
+          S.reflectionWeek = reflectionsDone;
+          S.phase = 'reflection';
+          go();
+          return;
+        } else if (hasPostSurvey2 && !S.completedPhases.postSurvey) {
+          S.phase = 'postsurvey';
+          go();
+          return;
+        }
+      }
       S.phase = 'complete';
       go();
       return;
@@ -648,23 +844,64 @@ function bindResume() {
           S.assMode = 'post';
           S.assQ = 0;
           S.assAnswers = [];
+        } else if (hasReflections2) {
+          const done = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+          S.reflectionWeek = done;
+          S.phase = 'reflection';
+        } else if (hasPostSurvey2) {
+          S.phase = 'postsurvey';
         } else {
           S.phase = 'complete';
         }
       } else {
+        // ── RESTORE FROM SAVED RESUME STATE ──
         S.phase = rs.phase || 'survey';
         S.puzzleIdx = rs.puzzleIdx || 0;
         S.assQ = rs.assQ || 0;
         S.assAnswers = rs.assAnswers || [];
         S.surveyAnswers = rs.surveyAnswers || {};
+        S.postSurveyAnswers = rs.postSurveyAnswers || {};
         S.reviewQueue = rs.reviewQueue || [];
         S.reviewIdx = rs.reviewIdx || 0;
         S.available = rs.available || [];
         S.userSeq = rs.userSeq || [];
         S.fadedLocked = rs.fadedLocked || [];
+        
+        // ── IMPROVED REFLECTION WEEK RESTORATION ──
+        const savedReflectionWeek = rs.reflectionWeek;
+        if (savedReflectionWeek !== undefined && savedReflectionWeek !== null && savedReflectionWeek > 0) {
+          S.reflectionWeek = savedReflectionWeek;
+        } else {
+          // Fallback: compute from completed reflections
+          S.reflectionWeek = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+        }
+        
+        // Restore completedPhases if stored
+        if (rs.completedPhases) {
+          S.completedPhases = { ...S.completedPhases, ...rs.completedPhases };
+        }
       }
     } else {
-      if (S.completedPhases.posttest) { S.phase='complete'; go(); return; }
+      // ── No resume state – determine phase from progress ──
+      if (S.completedPhases.posttest) {
+        if (hasReflections2 || hasPostSurvey2) {
+          const reflectionsDone = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+          const totalReflections = S.studyConfig?.reflections ? S.studyConfig.reflections.length : 0;
+          if (reflectionsDone < totalReflections) {
+            S.reflectionWeek = reflectionsDone;
+            S.phase = 'reflection';
+            go();
+            return;
+          } else if (hasPostSurvey2 && !S.completedPhases.postSurvey) {
+            S.phase = 'postsurvey';
+            go();
+            return;
+          }
+        }
+        S.phase = 'complete';
+        go();
+        return;
+      }
       if (S.completedPhases.puzzles && !S.completedPhases.posttest) {
         const minDays = S.studyConfig?.min_days_between_pretest_posttest || 0;
         if (minDays > 0 && S.metrics?.preCompletedAt) {
@@ -693,8 +930,8 @@ function bindResume() {
         }
       }
       if (S.completedPhases.pretest && !S.completedPhases.puzzles) {
-        S.phase='study';
-        S.puzzleIdx=S.puzzlesCompletedCount;
+        S.phase = 'study';
+        S.puzzleIdx = S.puzzlesCompletedCount;
         go();
         return;
       }
@@ -703,15 +940,19 @@ function bindResume() {
           S.phase = 'pre';
           S.assMode = 'pre';
           S.assQ = S.assAnswers.length;
+        } else if (hasPost2) {
+          S.phase = 'post';
+          S.assMode = 'post';
+          S.assQ = 0;
+          S.assAnswers = [];
+        } else if (hasReflections2) {
+          const done = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+          S.reflectionWeek = done;
+          S.phase = 'reflection';
+        } else if (hasPostSurvey2) {
+          S.phase = 'postsurvey';
         } else {
-          if (hasPost2) {
-            S.phase = 'post';
-            S.assMode = 'post';
-            S.assQ = 0;
-            S.assAnswers = [];
-          } else {
-            S.phase = 'complete';
-          }
+          S.phase = 'complete';
         }
         go();
         return;
@@ -721,15 +962,18 @@ function bindResume() {
     go();
   });
 
+  // ── Restart button ──
   restartBtn?.addEventListener('click', () => {
-    if(confirm('Erase all progress?')){
+    if (confirm('Erase all progress?')) {
       localStorage.removeItem(getStorageKey());
       S.metrics = { startedAt: Date.now(), puzzles: {} };
-      S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false };
+      S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false, postSurvey: false };
       S.puzzlesCompletedCount = 0;
       S.surveyAnswers = {};
       S.assAnswers = [];
       S.postTestPending = false;
+      S.postSurveyAnswers = {};
+      S.reflectionWeek = 0;
       S.phase = 'orient';
       saveLocalProgress();
       go();
@@ -747,7 +991,7 @@ function renderRegister() {
       <div><label>Full name *</label><input id="inpName" placeholder="e.g. Amina Bello" /></div>
       <div><label>Student ID / Matric number *</label><input id="inpMatric" placeholder="NDCS/024/2002" /></div>
       <div><label>Email address *</label><input id="inpEmail" type="email" placeholder="a.bello@student.edu" /></div>
-      <div><label>Gender</label><select id="inpGender"><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="non-binary">Non-binary</option><option value="other">Other</option></select></div>
+      <div><label>Gender</label><select id="inpGender"><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option></select></div>
       <div><label>Academic session (e.g., 2025/2026)</label><input id="inpSession" placeholder="2025/2026" /></div>
       <div><label>Class section</label><input id="inpSection" placeholder="A/B/C" /></div>
     </div>
@@ -1143,14 +1387,78 @@ async function onSelectStudy(studyId) {
   }
 }
 function renderOrient() {
-  const steps = [
-    {icon:'📋', text:'Background survey (~3 min)'},
-    {icon:'🧠', text:`Pre‑test (${S.studyConfig.preQ?.length} questions)`},
-    {icon:'🪜', text:`${S.studyConfig.puzzles.length} scaffolded puzzles (~30 min)`},
-    {icon:'🔁', text:'Review of 3 puzzles (~5 min)'},
-    {icon:'📋', text:`Post‑test (${S.studyConfig.postQ?.length} questions)`}
-  ];
-  return `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><div class="pcode-box"><p style="font-size:.82rem">Your participant code:</p><div class="pcode-num">${S.participantCode}</div></div>${S.randomisationGroup ? `<p><strong>Group:</strong> ${S.randomisationGroup === 'treatment' ? 'Treatment' : 'Control'}</p>` : ''}<h2>About this study</h2>${steps.map(s=>`<div class="orient-step"><span class="orient-icon">${s.icon}</span><div class="orient-body"><strong>${s.text}</strong></div></div>`).join('')}<div class="actions"><button class="btn btn-primary" id="btnOrientNext">Continue to consent →</button></div></div>`;
+  // ── Build dynamic steps based on study config ──
+  const steps = [];
+
+  // Determine if this is a survey‑only study
+  const hasPre = S.studyConfig.preQ && S.studyConfig.preQ.length > 0;
+  const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
+  const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
+  const hasReflections = S.studyConfig.reflections && S.studyConfig.reflections.length > 0;
+  const hasPostSurvey = S.studyConfig.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
+  const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey;
+
+  // Always include the survey step
+  const surveyLabel = isSurveyOnly 
+    ? 'Survey (approx. 10‑15 minutes)' 
+    : 'Background survey (~3 min)';
+  steps.push({ icon: '📋', text: surveyLabel });
+
+  // Pre‑test
+  const preCount = S.studyConfig.preQ?.length || 0;
+  if (preCount > 0) {
+    steps.push({ icon: '🧠', text: `Pre‑test (${preCount} questions)` });
+  }
+
+  // Puzzles
+  const puzzleCount = S.studyConfig.puzzles?.length || 0;
+  if (puzzleCount > 0) {
+    steps.push({ icon: '🪜', text: `${puzzleCount} scaffolded puzzles (~30 min)` });
+    // Review (only if puzzles exist)
+    steps.push({ icon: '🔁', text: 'Review of 3 puzzles (~5 min)' });
+  }
+
+  // Post‑test
+  const postCount = S.studyConfig.postQ?.length || 0;
+  if (postCount > 0) {
+    steps.push({ icon: '📋', text: `Post‑test (${postCount} questions)` });
+  }
+
+  // Weekly reflections (if any)
+  const refCount = S.studyConfig.reflections?.length || 0;
+  if (refCount > 0) {
+    steps.push({ icon: '✍️', text: `${refCount} weekly reflections` });
+  }
+
+  // Post‑survey (if any)
+  const postSurveyCount = S.studyConfig.postSurveyFields?.length || 0;
+  if (postSurveyCount > 0) {
+    steps.push({ icon: '📋', text: 'Post‑survey' });
+  }
+
+  // If no steps (should not happen), add a generic message
+  if (steps.length === 0) {
+    steps.push({ icon: '📋', text: 'Complete the study activities' });
+  }
+
+  // Build HTML
+  const stepsHtml = steps.map(s =>
+    `<div class="orient-step"><span class="orient-icon">${s.icon}</span><div class="orient-body"><strong>${s.text}</strong></div></div>`
+  ).join('');
+
+  const groupLabel = S.randomisationGroup === 'treatment' ? 'Treatment' :
+                     S.randomisationGroup === 'control' ? 'Control' : '';
+
+  return `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
+    <div class="pcode-box">
+      <p style="font-size:.82rem">Your participant code:</p>
+      <div class="pcode-num">${S.participantCode}</div>
+    </div>
+    ${groupLabel ? `<p><strong>Group:</strong> ${groupLabel}</p>` : ''}
+    <h2>About this study</h2>
+    ${stepsHtml}
+    <div class="actions"><button class="btn btn-primary" id="btnOrientNext">Continue to consent →</button></div>
+  </div>`;
 }
 function bindOrient() { el('btnOrientNext')?.addEventListener('click',()=>{ S.phase='consent'; go(); }); }
 function renderConsent() {
@@ -1242,6 +1550,9 @@ function bindConsent() {
     go();
   });
 }
+// ============================================================
+// RENDER SURVEY (PRE‑SURVEY) – with CHECKBOX support
+// ============================================================
 function renderSurveyDynamic() {
   const fields = S.studyConfig.surveyFields || [];
   const surveyTitle = S.studyConfig.title_en || 'Survey';
@@ -1297,6 +1608,18 @@ function renderSurveyDynamic() {
         </div>`;
       });
       html += `</div></div>`;
+    } else if (f.type === 'checkbox') {
+      const label = L(f, 'label');
+      const options = L(f, 'options') || [];
+      const selected = S.surveyAnswers[f.id] || [];
+      html += `<div class="field-row"><label>${label}</label><div class="checkbox-group" style="margin-top:6px;">`;
+      options.forEach(opt => {
+        const checked = selected.includes(opt) ? 'checked' : '';
+        html += `<label style="display:block; margin:4px 0;">
+          <input type="checkbox" data-field="${f.id}" class="sv-chk" value="${opt}" ${checked}> ${opt}
+        </label>`;
+      });
+      html += `</div></div>`;
     } else if (f.type === 'text') {
       const label = L(f, 'label');
       const placeholder = L(f, 'placeholder') || 'Write your answer here…';
@@ -1320,12 +1643,17 @@ function renderSurveyDynamic() {
     <p id="surveyMsg" style="color:var(--danger);text-align:center"></p></div>`;
   return html;
 }
+
+// ============================================================
+// BIND SURVEY (PRE‑SURVEY) – with CHECKBOX handling & new transition
+// ============================================================
 function bindSurveyDynamic() {
   const fields = S.studyConfig.surveyFields || [];
   const btn = el('btnSurveyNext');
   if (btn) btn.disabled = true;
 
   const updateBtn = () => {
+    // Capture selections
     document.querySelectorAll('.sv-sel').forEach(sel => {
       if (sel.value !== '') {
         S.surveyAnswers[sel.dataset.field] = sel.value;
@@ -1339,11 +1667,27 @@ function bindSurveyDynamic() {
         S.surveyAnswers[textarea.dataset.field] = textarea.value.trim();
       }
     });
+    // Checkboxes: store as array
+    document.querySelectorAll('.sv-chk').forEach(chk => {
+      const field = chk.dataset.field;
+      if (!S.surveyAnswers[field]) S.surveyAnswers[field] = [];
+      if (chk.checked) {
+        if (!S.surveyAnswers[field].includes(chk.value)) S.surveyAnswers[field].push(chk.value);
+      } else {
+        S.surveyAnswers[field] = S.surveyAnswers[field].filter(v => v !== chk.value);
+      }
+    });
 
+    // Check required fields (skip 'programme' and sections)
     const requiredFields = fields.filter(f => f.id && f.id !== 'programme' && f.type !== 'section');
     const allFilled = requiredFields.every(f => {
       const val = S.surveyAnswers[f.id];
-      return val !== undefined && val !== null && val !== '';
+      if (f.type === 'checkbox') {
+        // For checkbox, ensure at least one is selected
+        return Array.isArray(val) && val.length > 0;
+      } else {
+        return val !== undefined && val !== null && val !== '';
+      }
     });
 
     if (btn) btn.disabled = !allFilled;
@@ -1353,6 +1697,7 @@ function bindSurveyDynamic() {
     }
   };
 
+  // Bind events for existing types
   document.querySelectorAll('.sv-sel').forEach(sel => {
     sel.addEventListener('change', () => {
       S.surveyAnswers[sel.dataset.field] = sel.value;
@@ -1379,9 +1724,26 @@ function bindSurveyDynamic() {
     });
   });
 
+  // NEW: Bind checkboxes
+  document.querySelectorAll('.sv-chk').forEach(chk => {
+    chk.addEventListener('change', () => {
+      const field = chk.dataset.field;
+      if (!S.surveyAnswers[field]) S.surveyAnswers[field] = [];
+      if (chk.checked) {
+        if (!S.surveyAnswers[field].includes(chk.value)) S.surveyAnswers[field].push(chk.value);
+      } else {
+        S.surveyAnswers[field] = S.surveyAnswers[field].filter(v => v !== chk.value);
+      }
+      updateBtn();
+      saveLocalProgress();
+    });
+  });
+
   updateBtn();
 
+  // Submit / Continue
   el('btnSurveyNext')?.addEventListener('click', () => {
+    // Final capture (same as updateBtn but ensure all saved)
     document.querySelectorAll('.sv-sel').forEach(sel => {
       if (sel.value !== '') S.surveyAnswers[sel.dataset.field] = sel.value;
     });
@@ -1391,43 +1753,378 @@ function bindSurveyDynamic() {
     document.querySelectorAll('.sv-text').forEach(textarea => {
       if (textarea.value.trim() !== '') S.surveyAnswers[textarea.dataset.field] = textarea.value.trim();
     });
+    document.querySelectorAll('.sv-chk').forEach(chk => {
+      const field = chk.dataset.field;
+      if (!S.surveyAnswers[field]) S.surveyAnswers[field] = [];
+      if (chk.checked) {
+        if (!S.surveyAnswers[field].includes(chk.value)) S.surveyAnswers[field].push(chk.value);
+      } else {
+        S.surveyAnswers[field] = S.surveyAnswers[field].filter(v => v !== chk.value);
+      }
+    });
     saveLocalProgress();
 
     S.completedPhases.survey = true;
     S.inProgressPhase = 'pretest';
     saveLocalProgress();
 
+    // ── NEW TRANSITION LOGIC ─────────────────────────────
     const hasPre = S.studyConfig.preQ && S.studyConfig.preQ.length > 0;
     const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
     const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
+    const hasReflections = S.studyConfig.reflections && S.studyConfig.reflections.length > 0;
+    const hasPostSurvey = S.studyConfig.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
 
     if (!hasPre && !hasPost && !hasPuzzles) {
-      console.log('Survey-only study completed. Saving completion to server.');
-      S.completedSaved = true;
-      S.completedPhases.posttest = true;
-      saveLocalProgress({ completed: true });
-    }
-
-    if (hasPre) {
-      S.phase = 'pre';
-      S.assMode = 'pre';
-      S.assQ = 0;
-      S.assAnswers = [];
-    } else if (hasPost) {
-      S.phase = 'post';
-      S.assMode = 'post';
-      S.assQ = 0;
-      S.assAnswers = [];
-    } else if (hasPuzzles) {
-      S.phase = 'study';
-      S.puzzleIdx = 0;
+      // Survey‑only study
+      if (hasReflections) {
+        S.reflectionWeek = 0;
+        S.phase = 'reflection';
+      } else if (hasPostSurvey) {
+        S.phase = 'postsurvey';
+      } else {
+        // No tests, no reflections, no post‑survey → complete
+        console.log('Survey-only study completed.');
+        S.completedSaved = true;
+        S.completedPhases.posttest = true;
+        saveLocalProgress({ completed: true });
+        S.phase = 'debrief';
+      }
     } else {
-      S.phase = 'debrief';
+      // Existing flow for studies with puzzles/tests
+      if (hasPre) {
+        S.phase = 'pre';
+        S.assMode = 'pre';
+        S.assQ = 0;
+        S.assAnswers = [];
+      } else if (hasPost) {
+        S.phase = 'post';
+        S.assMode = 'post';
+        S.assQ = 0;
+        S.assAnswers = [];
+      } else if (hasPuzzles) {
+        S.phase = 'study';
+        S.puzzleIdx = 0;
+      } else {
+        S.phase = 'debrief';
+      }
     }
     go();
   });
 }
+
+function renderFields(fields, answers, title) {
+  let html = `<h2>${title}</h2>`;
+  fields.forEach(f => {
+    if (f.type === 'section') {
+      html += `<div class="survey-section">
+        <h3>${f.label_en}</h3>
+        ${f.instructions ? `<p>${f.instructions}</p>` : ''}
+        ${f.scaleLabels ? `<p class="scale-labels">${f.scaleLabels}</p>` : ''}
+      </div>`;
+      return;
+    }
+    if (f.type === 'text') {
+      const val = answers[f.id] || '';
+      html += `<div class="field-row" style="margin-bottom:16px;">
+        <label style="display:block; font-weight:600; margin-bottom:6px;">${f.label_en}</label>
+        <textarea data-field="${f.id}" class="ref-text" style="width:100%; padding:10px; border-radius:12px; border:1.5px solid var(--border); min-height:80px; font-family:inherit; resize:vertical;">${escapeHtml(val)}</textarea>
+      </div>`;
+    } else if (f.type === 'likert_with_na') {
+      const options = f.options || ['Never', 'Seldom', 'Sometimes', 'Often', 'Always', 'Not applicable to this course'];
+      html += `<div class="likert-row"><div class="lq">${f.label_en}</div><div class="likert-scale">`;
+      options.forEach((opt, idx) => {
+        const checked = (answers[f.id] === opt) ? 'checked' : '';
+        html += `<div class="lk-opt">
+          <input type="radio" name="${f.id}" id="${f.id}_${idx}" value="${opt}" data-field="${f.id}" class="ref-lk" ${checked}>
+          <label for="${f.id}_${idx}"><span>${opt}</span></label>
+        </div>`;
+      });
+      html += `</div></div>`;
+    }
+    // Add other types if needed (e.g., select, but not used here)
+  });
+  return html;
+}
+
+function renderReflectionDynamic() {
+  const reflections = S.studyConfig.reflections || [];
+  const total = reflections.length;
+  const idx = S.reflectionWeek;
+  if (idx >= total) {
+    // All done – show a button to go to post‑survey
+    return `${topbarHTML()}<div class="main-card">
+      <h2>Reflections Complete</h2>
+      <p>You have completed all weekly reflections.</p>
+      <div class="actions"><button class="btn btn-primary" id="btnGoToPostSurvey">Continue to Post‑Survey →</button></div>
+    </div>`;
+  }
+
+  const weekData = reflections[idx];
+  if (!isReflectionAvailable(idx)) {
+  const nextDate = getReflectionAvailableDate(idx);
+  return `${topbarHTML()}<div class="main-card">
+    <h2>✍️ ${weekData.title}</h2>
+    <div class="reflection-waiting">
+      <p>⏳ This reflection will be available on <strong>${formatDateDDMMYYYY(nextDate)}</strong>.</p>
+      <p>Please return then to continue.</p>
+    </div>
+    <div class="actions"><button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button></div>
+  </div>`;
+}
+
+  const answers = S.metrics.reflections?.[idx] || {};
+  // Prefill participant info (name and matric) for display
+  const participantInfo = `<div class="pcode-box" style="margin-bottom:20px;">
+    <p><strong>Participant:</strong> ${escapeHtml(S.participantName || '')} (${escapeHtml(S.participantMatric || '')})</p>
+    <p><strong>Participant code:</strong> ${escapeHtml(S.participantCode || '')}</p>
+  </div>`;
+
+  const fieldsHtml = renderFields(weekData.fields, answers, weekData.title);
+  const html = `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
+    ${participantInfo}
+    ${fieldsHtml}
+    <div class="actions"><button class="btn btn-primary" id="btnReflectSubmit">Submit Reflection →</button></div>
+    <p id="reflectionMsg" style="color:var(--danger);text-align:center"></p>
+  </div>`;
+  return html;
+}
+
+function bindReflectionDynamic() {
+  // Save answers on change (radio / text)
+  document.querySelectorAll('.ref-text').forEach(el => {
+    el.addEventListener('input', () => {
+      const idx = S.reflectionWeek;
+      if (!S.metrics.reflections) S.metrics.reflections = [];
+      if (!S.metrics.reflections[idx]) S.metrics.reflections[idx] = {};
+      S.metrics.reflections[idx][el.dataset.field] = el.value;
+      saveLocalProgress();
+    });
+  });
+  document.querySelectorAll('.ref-lk').forEach(el => {
+    el.addEventListener('change', () => {
+      if (el.checked) {
+        const idx = S.reflectionWeek;
+        if (!S.metrics.reflections) S.metrics.reflections = [];
+        if (!S.metrics.reflections[idx]) S.metrics.reflections[idx] = {};
+        S.metrics.reflections[idx][el.dataset.field] = el.value;
+        saveLocalProgress();
+      }
+    });
+  });
+
+  // Submit button
+  el('btnReflectSubmit')?.addEventListener('click', () => {
+    const idx = S.reflectionWeek;
+    const fields = S.studyConfig.reflections[idx].fields;
+    const answers = S.metrics.reflections?.[idx] || {};
+    // Check required fields (only those with "required": true)
+    const requiredFields = fields.filter(f => f.required === true);
+    const missing = requiredFields.filter(f => !answers[f.id] || answers[f.id].trim() === '');
+    if (missing.length) {
+      document.getElementById('reflectionMsg').textContent = 'Please answer all required questions.';
+      return;
+    }
+    // Set start date if not set
+    if (!S.metrics.reflectionStartDate) {
+      S.metrics.reflectionStartDate = Date.now();
+    }
+    // Save current answers (already saved via change events, but ensure)
+    saveLocalProgress();
+    // Advance to next week and save immediately
+    S.reflectionWeek = idx + 1;
+    saveLocalProgress();   // <-- CRITICAL FIX: ensure the new week is persisted
+    go();
+  });
+
+  // Continue to post‑survey (shown after all reflections done)
+  el('btnGoToPostSurvey')?.addEventListener('click', () => {
+    S.phase = 'postsurvey';
+    go();
+  });
+
+  // Back to studies (for locked reflections)
+  el('btnBackToStudies')?.addEventListener('click', () => {
+    S.phase = 'studySelect';
+    go();
+  });
+}
+function renderPostSurveyDynamic() {
+  const fields = S.studyConfig.postSurveyFields || [];
+  const surveyTitle = S.studyConfig.title_en + ' – Post-Survey';
+  let html = `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><h2>📋 ${surveyTitle}</h2>`;
+  
+  fields.forEach(f => {
+    if (f.type === 'section') {
+      html += `<div class="survey-section">
+        <h3>${f.label_en}</h3>
+        ${f.instructions ? `<p>${f.instructions}</p>` : ''}
+        ${f.scaleLabels ? `<p class="scale-labels">${f.scaleLabels}</p>` : ''}
+      </div>`;
+      return;
+    }
+    if (f.type === 'select') {
+      const label = L(f, 'label');
+      const opts = L(f, 'options') || [];
+      const val = S.postSurveyAnswers[f.id] || '';
+      html += `<div class="field-row"><label>${label}</label>
+        <select data-field="${f.id}" class="sv-sel-post">
+          <option value="">— select —</option>
+          ${opts.map((o, i) => `<option value="${i}" ${val == i ? 'selected' : ''}>${o}</option>`).join('')}
+        </select>
+      </div>`;
+    } else if (f.type === 'likert') {
+      const label = L(f, 'label');
+      const options = L(f, 'options') || ['Never', 'Seldom', 'Sometimes', 'Often', 'Always'];
+      html += `<div class="likert-row"><div class="lq">${label}</div><div class="likert-scale">`;
+      options.forEach((opt, idx) => {
+        const val = idx + 1;
+        const checked = (S.postSurveyAnswers[f.id] == val) ? 'checked' : '';
+        html += `<div class="lk-opt">
+          <input type="radio" name="${f.id}" id="${f.id}_${val}" value="${val}" data-field="${f.id}" class="sv-lk-post" ${checked}>
+          <label for="${f.id}_${val}"><span class="lk-num">${val}</span><span>${opt}</span></label>
+        </div>`;
+      });
+      html += `</div></div>`;
+    } else if (f.type === 'text') {
+      const label = L(f, 'label');
+      const placeholder = L(f, 'placeholder') || 'Write your answer here…';
+      const val = S.postSurveyAnswers[f.id] || '';
+      html += `<div class="field-row" style="margin-bottom:20px;">
+        <label style="display:block; font-weight:600; margin-bottom:6px;">${label}</label>
+        <textarea data-field="${f.id}" class="sv-text-post" placeholder="${placeholder}" style="width:100%; padding:10px; border-radius:12px; border:1.5px solid var(--border); min-height:80px; font-family:inherit; resize:vertical;">${escapeHtml(val)}</textarea>
+      </div>`;
+    }
+  });
+  
+  html += `<div class="actions"><button class="btn btn-primary" id="btnPostSurveyNext" disabled>Submit Post-Survey →</button></div>
+    <p id="postSurveyMsg" style="color:var(--danger);text-align:center"></p></div>`;
+  return html;
+}
+
+function bindPostSurveyDynamic() {
+  const fields = S.studyConfig.postSurveyFields || [];
+  const btn = el('btnPostSurveyNext');
+  if (btn) btn.disabled = true;
+
+  const updateBtn = () => {
+    // Gather all answers
+    document.querySelectorAll('.sv-sel-post').forEach(sel => {
+      if (sel.value !== '') S.postSurveyAnswers[sel.dataset.field] = parseInt(sel.value);
+    });
+    document.querySelectorAll('.sv-lk-post:checked').forEach(radio => {
+      S.postSurveyAnswers[radio.dataset.field] = parseInt(radio.value);
+    });
+    document.querySelectorAll('.sv-text-post').forEach(textarea => {
+      if (textarea.value.trim() !== '') S.postSurveyAnswers[textarea.dataset.field] = textarea.value.trim();
+    });
+
+    const requiredFields = fields.filter(f => f.required === true && f.type !== 'section');
+    const allFilled = requiredFields.every(f => {
+      const val = S.postSurveyAnswers[f.id];
+      return val !== undefined && val !== null && val !== '';
+    });
+    if (btn) btn.disabled = !allFilled;
+    const msg = el('postSurveyMsg');
+    if (msg) msg.textContent = allFilled ? '' : 'Please answer all required questions.';
+  };
+
+  // Bind events
+  document.querySelectorAll('.sv-sel-post, .sv-lk-post, .sv-text-post').forEach(el => {
+    el.addEventListener('change', updateBtn);
+    el.addEventListener('input', updateBtn);
+  });
+
+  updateBtn();
+
+  el('btnPostSurveyNext')?.addEventListener('click', () => {
+    // Final capture
+    document.querySelectorAll('.sv-sel-post').forEach(sel => {
+      if (sel.value !== '') S.postSurveyAnswers[sel.dataset.field] = parseInt(sel.value);
+    });
+    document.querySelectorAll('.sv-lk-post:checked').forEach(radio => {
+      S.postSurveyAnswers[radio.dataset.field] = parseInt(radio.value);
+    });
+    document.querySelectorAll('.sv-text-post').forEach(textarea => {
+      if (textarea.value.trim() !== '') S.postSurveyAnswers[textarea.dataset.field] = textarea.value.trim();
+    });
+    saveLocalProgress();
+
+    // Mark as complete and send to server
+    S.completedPhases.posttest = true;
+    S.completedPhases.postSurvey = true;
+    saveLocalProgress({ completed: true });   // updates enrolment status to 'completed'
+
+    S.phase = 'debrief';
+    go();
+  });
+}
+function renderResume() {
+  const m = S.metrics || {};
+  const displayName = (S.participantName && S.participantName.trim() !== '') ? S.participantName : 'Participant';
+
+  // ── Determine study type ──
+  const hasPuzzles = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
+  const hasReflections = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
+  const hasPostSurvey = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
+
+  // ── Build resume stats ──
+  let statsHtml = '';
+
+  if (hasPuzzles) {
+    // Original puzzle-based study stats
+    const solved = Object.values(m.puzzles || {}).filter(p => p.completed).length;
+    const guided = Object.values(m.puzzles || {}).filter(p => p.guided).length;
+    const preScore = (m.preScore !== undefined && m.preScore !== null) ? `${m.preScore}%` : '—';
+    const totalPuzzles = S.totalPuzzles || S.studyConfig?.puzzles?.length || 0;
+    const totalElapsed = m.startedAt ? (Date.now() - m.startedAt) : 0;
+    const elapsedFormatted = formatElapsedTime(totalElapsed);
+
+    statsHtml = `
+      <div class="resume-stat"><div class="rnum">${solved}/${totalPuzzles}</div><div class="rlbl">Puzzles solved</div></div>
+      <div class="resume-stat"><div class="rnum">${guided}</div><div class="rlbl">Needed guidance</div></div>
+      <div class="resume-stat"><div class="rnum">${preScore}</div><div class="rlbl">Pre-test %</div></div>
+      <div class="resume-stat"><div class="rnum">${elapsedFormatted}</div><div class="rlbl">Time since you started</div></div>
+    `;
+  } else {
+    // For studies without puzzles (e.g., Study 3)
+    const preSurveyDone = S.completedPhases.survey ? '✅' : '⬜';
+    const reflectionsDone = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+    const totalReflections = hasReflections ? S.studyConfig.reflections.length : 0;
+    const postSurveyDone = S.completedPhases.postSurvey ? '✅' : '⬜';
+
+    statsHtml = `
+      <div class="resume-stat"><div class="rnum">${preSurveyDone}</div><div class="rlbl">Pre‑survey</div></div>
+      ${hasReflections ? `<div class="resume-stat"><div class="rnum">${reflectionsDone}/${totalReflections}</div><div class="rlbl">Reflections completed</div></div>` : ''}
+      ${hasPostSurvey ? `<div class="resume-stat"><div class="rnum">${postSurveyDone}</div><div class="rlbl">Post‑survey</div></div>` : ''}
+    `;
+  }
+
+  return `${topbarHTML()}<div class="main-card"><h2>👋 Welcome back, ${escapeHtml(displayName)}</h2>
+    <div class="pcode-box"><p>Your participant code:</p><div class="pcode-num">${S.participantCode}</div></div>
+    <div class="resume-grid">${statsHtml}</div>
+    <div class="example-box">Pick up exactly where you left off.</div>
+    <div class="actions"><button class="btn btn-primary" id="btnResumeContinue">▶ Resume</button>
+    <button class="btn btn-secondary" id="btnResumeRestart">↺ Start fresh</button></div></div>`;
+}
+
 function renderAssessmentDynamic(mode) {
+  // ── Safety guard: if config is missing, redirect ──
+  if (!S.studyConfig) {
+    console.warn('renderAssessmentDynamic: studyConfig missing, redirecting to studySelect');
+    S.phase = 'studySelect';
+    go();
+    return '';
+  }
+
+  // If mode is post but there is no postQ, redirect to studySelect (for Study 3)
+  if (mode === 'post' && (!S.studyConfig.postQ || S.studyConfig.postQ.length === 0)) {
+    console.warn('renderAssessmentDynamic: post mode called but no postQ – redirecting');
+    S.phase = 'studySelect';
+    go();
+    return '';
+  }
+
   if (mode === 'post' && !canStartPostTest()) {
     const minDays = S.studyConfig?.min_days_between_pretest_posttest || 0;
     const preDate = new Date(S.metrics.preCompletedAt);
@@ -1444,10 +2141,7 @@ function renderAssessmentDynamic(mode) {
   const isPost = mode === 'post';
   const total = qs.length;
 
-  // Format question text with preserved whitespace
   const questionHtml = q.q_en || q.q || '';
-  // We'll put it inside <pre> to preserve line breaks and indentation
-  // Also add a monospace class for code snippets
   const formattedQuestion = `<pre class="question-code">${escapeHtml(questionHtml)}</pre>`;
 
   return `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
@@ -1474,8 +2168,20 @@ function renderAssessmentDynamic(mode) {
     </div>
   </div>`;
 }
+
 function bindAssessmentDynamic(mode) {
-  // Answer selection
+  if (!S.studyConfig) {
+    console.warn('bindAssessmentDynamic: studyConfig missing – aborting');
+    return;
+  }
+  // If post mode but no postQ, redirect
+  if (mode === 'post' && (!S.studyConfig.postQ || S.studyConfig.postQ.length === 0)) {
+    console.warn('bindAssessmentDynamic: post mode called with no postQ – redirecting');
+    S.phase = 'studySelect';
+    go();
+    return;
+  }
+
   document.querySelectorAll('.option-btn:not([disabled])').forEach(btn => {
     btn.onclick = () => {
       S.assAnswers[S.assQ] = parseInt(btn.dataset.idx);
@@ -1484,7 +2190,13 @@ function bindAssessmentDynamic(mode) {
     };
   });
 
-  // Next button
+  el('btnAssPrev')?.addEventListener('click', () => {
+    if (S.assQ > 0) {
+      S.assQ--;
+      go();
+    }
+  });
+
   el('btnAssNext')?.addEventListener('click', () => {
     const qs = mode === 'pre' ? S.studyConfig.preQ : S.studyConfig.postQ;
     if (S.assQ < qs.length - 1) {
@@ -1520,14 +2232,6 @@ function bindAssessmentDynamic(mode) {
         S.phase = 'debrief';
         go();
       }
-    }
-  });
-
-  // Previous button
-  el('btnAssPrev')?.addEventListener('click', () => {
-    if (S.assQ > 0) {
-      S.assQ--;
-      go();
     }
   });
 }
@@ -1778,6 +2482,14 @@ function renderDebrief() {
   return `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><div class="cert-box"><div class="pcode-num">${S.participantCode}</div>${gain!==null?`<p>Learning gain: ${gain>=0?'+':''}${gain}%</p>`:''}</div><div class="actions"><button class="btn btn-primary" id="btnDebriefNext">View results →</button></div></div>`;
 }
 async function renderComplete() {
+  // ── Safety guard for post‑survey (Study 3) ──
+  const hasPostSurvey = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
+  if (hasPostSurvey && !S.completedPhases.postSurvey) {
+    S.phase = 'postsurvey';
+    go();
+    return '';
+  }
+
   const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
   const hasDelayedPostTest = S.studyConfig.delayed_post_test_weeks > 0;
   const followupCompleted = S.metrics?.followupCompleted === true;
@@ -1793,7 +2505,7 @@ async function renderComplete() {
     return certificatePage();
   }
 
-  // --- Delayed post‑test is pending ---
+  // --- Delayed post‑test pending (from delayed_post_test_weeks) ---
   if (hasDelayedPostTest && !followupCompleted) {
     let message = '';
     let buttonHtml = '';
@@ -1801,10 +2513,12 @@ async function renderComplete() {
       message = 'The delayed post‑test is now available.';
       buttonHtml = `<button class="btn btn-primary" id="btnStartFollowupFromComplete">Start delayed post‑test →</button>`;
     } else {
-      const daysLeft = followupAvailableAt
-        ? Math.ceil((followupAvailableAt - new Date()) / (1000 * 60 * 60 * 24))
-        : 'soon';
-      message = `The delayed post‑test will be available in ${daysLeft} day(s). Please return later.`;
+      if (followupAvailableAt) {
+        const formattedDate = formatDateDDMMYYYY(followupAvailableAt);
+        message = `The delayed post‑test will be available on <strong>${formattedDate}</strong>. Please return then.`;
+      } else {
+        message = 'The delayed post‑test will be available after the waiting period. Please check back later.';
+      }
     }
     return `${topbarHTML()}<div class="main-card">
       <h2>Study in progress</h2>
@@ -1816,30 +2530,29 @@ async function renderComplete() {
     </div>`;
   }
 
-  // --- Post‑test waiting period (min_days_between_pretest_posttest) ---
+  // --- Post‑test waiting period (from min_days_between_pretest_posttest) ---
   if (S.postTestPending && S.completedPhases.puzzles && S.studyConfig?.min_days_between_pretest_posttest > 0) {
     const preDate = new Date(S.metrics.preCompletedAt);
-    const now = new Date();
     const minDays = S.studyConfig.min_days_between_pretest_posttest;
-    const daysSincePre = (now - preDate) / (1000 * 60 * 60 * 24);
-    const daysLeft = Math.ceil(minDays - daysSincePre);
-    const waitingDays = isNaN(daysLeft) ? minDays : daysLeft;
+    const availableDate = new Date(preDate);
+    availableDate.setDate(availableDate.getDate() + minDays);
+    const formattedDate = formatDateDDMMYYYY(availableDate);
+    
     return `${topbarHTML()}<div class="main-card">
       <h2>Post‑test waiting period</h2>
-      <p>You have completed the main study. The post‑test will be available in <strong>${waitingDays} day(s)</strong>.</p>
-      <p>You will be able to take it when you return after ${minDays} days from your pre‑test.</p>
+      <p>You have completed the main study. The post‑test will be available on <strong>${formattedDate}</strong>.</p>
+      <p>Please return on or after that date to take the post‑test.</p>
       <div class="actions"><button class="btn btn-primary" id="btnBackToStudies">← Back to Studies</button></div>
     </div>`;
   }
 
   // --- Completion (no delayed post‑test, or follow‑up already done) ---
-  // Mark as completed if not already done
   if (!S.completedSaved) {
     S.completedSaved = true;
     saveLocalProgress({ completed: true });
   }
 
-  // Certificate page (existing code)
+  // --- Certificate page (with inline onclick) ---
   const solved = Object.values(S.metrics?.puzzles || {}).filter(p => p.completed).length;
   let peerHtml = '';
   if (API_BASE !== undefined && S.currentStudyId) {
@@ -1851,10 +2564,23 @@ async function renderComplete() {
     }
   }
 
-  return `${topbarHTML()}<div class="main-card"><div class="score-hero"><div class="score-big">${solved}/${S.studyConfig.puzzles.length}</div><p>puzzles solved</p></div>${peerHtml}<div class="actions"><button class="btn btn-secondary" id="btnViewDash">📊 Dashboard</button><button class="btn btn-primary" id="btnDownloadCertPDF">📄 Download Certificate (PDF)</button><button class="btn btn-secondary" id="btnPrintCert">🖨 Print certificate</button><button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button></div></div>`;
+  return `${topbarHTML()}<div class="main-card">
+    <div class="score-hero">
+      <div class="score-big">${solved}/${S.studyConfig.puzzles.length}</div>
+      <p>puzzles solved</p>
+    </div>
+    ${peerHtml}
+    <div class="actions">
+      <button class="btn btn-secondary" id="btnViewDash">📊 Dashboard</button>
+      <button class="btn btn-primary" onclick="window.handleDownloadCertificate()">📄 Download Certificate (PDF)</button>
+      <button class="btn btn-secondary" onclick="window.handlePrintCertificate()">🖨 Print certificate</button>
+      <button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button>
+    </div>
+  </div>`;
 }
 
 // Helper for survey‑only certificate (kept for clarity)
+
 function certificatePage() {
   return `${topbarHTML()}<div class="main-card">
     <div style="text-align:center; padding:20px 0;">
@@ -1863,14 +2589,13 @@ function certificatePage() {
       <p>Thank you for your participation in this study.</p>
       <p style="color:var(--muted);">You can download your certificate below.</p>
       <div class="actions" style="justify-content:center; margin-top:24px;">
-        <button class="btn btn-primary" id="btnDownloadCertPDF">📄 Download Certificate (PDF)</button>
-        <button class="btn btn-secondary" id="btnPrintCert">🖨 Print certificate</button>
+        <button class="btn btn-primary" onclick="window.handleDownloadCertificate()">📄 Download Certificate (PDF)</button>
+        <button class="btn btn-secondary" onclick="window.handlePrintCertificate()">🖨 Print certificate</button>
         <button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button>
       </div>
     </div>
   </div>`;
 }
-
 function bindDebrief() {
   el('btnDebriefBack')?.addEventListener('click', () => {
     S.studyConfig = null;
@@ -1883,53 +2608,29 @@ function bindDebrief() {
   });
 }
 function bindComplete() {
+  // Dashboard
   el('btnViewDash')?.addEventListener('click', () => {
     window.location.href = window.location.pathname + '?admin=true';
   });
 
-  el('btnDownloadCertPDF')?.addEventListener('click', () => {
-    const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
-    const certHtml = generateCertificateHTML(completionDate);
-    const blob = new Blob([certHtml], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `certificate_${S.participantCode}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    alert('Certificate HTML saved. Open it in your browser and print to PDF for a permanent copy.');
+  // Back to studies (for both certificate and waiting page)
+  el('btnBackToStudies')?.addEventListener('click', async () => {
+    if (S.participantCode) {
+      S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
+    }
+    S.studyConfig = null;
+    S.phase = 'studySelect';
+    go();
   });
 
-  el('btnPrintCert')?.addEventListener('click', () => {
-    const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
-    const certHtml = generateCertificateHTML(completionDate);
-    const win = window.open();
-    win.document.write(certHtml);
-    win.document.close();
-    win.focus();
-    win.print();
+  el('btnBackToStudiesFromComplete')?.addEventListener('click', async () => {
+    if (S.participantCode) {
+      S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
+    }
+    S.studyConfig = null;
+    S.phase = 'studySelect';
+    go();
   });
-
-  // For both certificate and waiting page back buttons
-el('btnBackToStudies')?.addEventListener('click', async () => {
-  if (S.participantCode) {
-    S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
-  }
-  S.studyConfig = null;
-  S.phase = 'studySelect';
-  go();
-});
-
-el('btnBackToStudiesFromComplete')?.addEventListener('click', async () => {
-  if (S.participantCode) {
-    S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
-  }
-  S.studyConfig = null;
-  S.phase = 'studySelect';
-  go();
-});
 
   // Start delayed post‑test from the waiting page
   el('btnStartFollowupFromComplete')?.addEventListener('click', () => {
@@ -2055,12 +2756,46 @@ function canStartPostTest() {
   const now = new Date();
   return (now - preDate) / (1000*60*60*24) >= minDays;
 }
+// ============================================================
+// CERTIFICATE HANDLERS (inline onclick)
+// ============================================================
+window.handleDownloadCertificate = function() {
+  const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
+  const certHtml = generateCertificateHTML(completionDate);
+  const blob = new Blob([certHtml], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `certificate_${S.participantCode || 'participant'}.html`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  alert('Certificate HTML saved. Open it in your browser and print to PDF for a permanent copy.');
+};
+
+window.handlePrintCertificate = function() {
+  const completionDate = S.metrics?.completedAt || S.metrics?.mainCompletedAt || null;
+  const certHtml = generateCertificateHTML(completionDate);
+  const win = window.open();
+  if (!win) {
+    alert('Popup blocked. Please allow popups for this site.');
+    return;
+  }
+  win.document.write(certHtml);
+  win.document.close();
+  win.focus();
+  win.print();
+};
+
+// ============================================================
+// GENERATE CERTIFICATE HTML (working version from GitHub)
+// ============================================================
 function generateCertificateHTML(completionDateOverride) {
   const studyTitle = S.studyConfig?.title_en || 'Computing Education Research Study';
   const participantName = S.participantName || 'Participant';
   const participantCode = S.participantCode || 'N/A';
   
-  // Determine completion date
   let completionDate;
   if (completionDateOverride) {
     completionDate = new Date(completionDateOverride).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -2156,6 +2891,10 @@ function generateCertificateHTML(completionDateOverride) {
     </html>
   `;
 }
+
+// ============================================================
+// RENDER CERTIFICATES PAGE
+// ============================================================
 function renderCertificates() {
   return `${topbarHTML()}<div class="main-card">
     <h2>📜 Your Certificates</h2>
@@ -2180,6 +2919,9 @@ function renderCertificates() {
   </div>`;
 }
 
+// ============================================================
+// BIND CERTIFICATES (with filtering for truly completed studies)
+// ============================================================
 async function bindCertificates() {
   const codeInput = document.getElementById('certCode');
   const listDiv = document.getElementById('certList');
@@ -2220,7 +2962,7 @@ async function bindCertificates() {
     go();
   });
 
-  // --- Live search for certificates ---
+  // --- Live search for certificates (with filtering) ---
   codeInput?.addEventListener('input', async () => {
     const code = codeInput.value.trim().toUpperCase();
     if (code.length < 5) {
@@ -2229,12 +2971,46 @@ async function bindCertificates() {
     }
     try {
       const enrolments = await apiGetMyEnrolments(code);
-      const completed = enrolments.filter(e => e.status === 'completed');
-      if (completed.length === 0) {
+      const trulyCompleted = [];
+      for (const enrol of enrolments) {
+        if (enrol.status !== 'completed') continue;
+        const config = await apiFetchStudyConfig(enrol.study_id);
+        if (!config) continue; // skip if config missing (safe)
+
+        const hasReflections = config.reflections && config.reflections.length > 0;
+        const hasPostSurvey = config.postSurveyFields && config.postSurveyFields.length > 0;
+        if (!hasReflections && !hasPostSurvey) {
+          // Truly completed (no pending phases)
+          trulyCompleted.push(enrol);
+          continue;
+        }
+
+        // Load progress to check completion of reflections and post‑survey
+        let progress = null;
+        const local = loadLocalProgress ? loadLocalProgress() : null;
+        if (local) {
+          progress = local;
+        } else {
+          const remote = await apiLoadProgress(enrol.id);
+          if (remote?.progress) progress = remote.progress;
+        }
+        if (!progress) continue; // no progress – skip
+
+        const reflectionsDone = progress.metrics?.reflections ? progress.metrics.reflections.length : 0;
+        const totalReflections = config.reflections ? config.reflections.length : 0;
+        const postSurveyDone = progress.completedPhases?.postSurvey || false;
+
+        if (reflectionsDone >= totalReflections && (postSurveyDone || !hasPostSurvey)) {
+          trulyCompleted.push(enrol);
+        }
+      }
+
+      if (trulyCompleted.length === 0) {
         listDiv.innerHTML = '<p>No completed studies found for this code.</p>';
         return;
       }
-      listDiv.innerHTML = completed.map(e => {
+
+      listDiv.innerHTML = trulyCompleted.map(e => {
         const studyTitle = e.study?.title_en || 'Study';
         const completedDate = e.completed_at ? new Date(e.completed_at).toLocaleDateString() : 'N/A';
         return `<div class="cert-item" style="display:flex;justify-content:space-between;align-items:center;padding:12px;border-bottom:1px solid var(--border);">
@@ -2243,15 +3019,15 @@ async function bindCertificates() {
         </div>`;
       }).join('');
 
-      // Bind download buttons
+      // Bind download buttons for each certificate
       document.querySelectorAll('.cert-download').forEach(btn => {
         btn.addEventListener('click', async () => {
           const enrolId = btn.dataset.enrolment;
           const code = btn.dataset.code;
-          const enrol = completed.find(e => e.id == enrolId);
+          const enrol = trulyCompleted.find(e => e.id == enrolId);
           if (!enrol) return;
 
-          // Temporarily set S to this study's data to reuse generateCertificateHTML
+          // Temporarily switch S to this study's context
           const oldConfig = S.studyConfig;
           const oldMetrics = S.metrics;
           const oldName = S.participantName;
@@ -2272,7 +3048,6 @@ async function bindCertificates() {
             S.metrics.durationMs = new Date(enrol.completed_at) - new Date(S.metrics.startedAt);
           }
 
-          // const certHtml = generateCertificateHTML();
           const certHtml = generateCertificateHTML(enrol.completed_at);
 
           // Restore original state
@@ -2305,11 +3080,22 @@ async function bindCertificates() {
 // ============================================================
 async function go() {
   const urlParams = new URLSearchParams(window.location.search);
-  if (urlParams.has('admin') && S.phase !== 'dashboard' && !S.isAdminMode) { S.isAdminMode = true; S.phase = 'adminLogin'; }
+  if (urlParams.has('admin') && S.phase !== 'dashboard' && !S.isAdminMode) {
+    S.isAdminMode = true;
+    S.phase = 'adminLogin';
+  }
   const resumeCode = urlParams.get('resume');
   if (resumeCode && S.phase === 'hero') {
-    setTimeout(() => { const inp = document.getElementById('resumeCode'); if(inp) { inp.value = resumeCode; document.getElementById('btnDoResume')?.click(); } }, 100);
+    setTimeout(() => {
+      const inp = document.getElementById('resumeCode');
+      if (inp) {
+        inp.value = resumeCode;
+        document.getElementById('btnDoResume')?.click();
+      }
+    }, 100);
   }
+
+  // ---- Reload study config if needed ----
   const phasesNeedingConfig = ['orient','consent','survey','pre','study','faded','attempt','reflect','code','review','post','followup','guided','debrief','complete','resume'];
   if (phasesNeedingConfig.includes(S.phase) && !S.studyConfig && S.currentStudyId) {
     console.log('Reloading study config');
@@ -2317,51 +3103,128 @@ async function go() {
       S.studyConfig = await apiFetchStudyConfig(S.currentStudyId);
       if (!S.studyConfig) throw new Error('No config');
       S.totalPuzzles = S.studyConfig.puzzles?.length || 0;
-    } catch(e) { alert('Could not load study. Please try again.'); S.phase='hero'; go(); return; }
+    } catch(e) {
+      alert('Could not load study. Please try again.');
+      S.phase = 'hero';
+      go();
+      return;
+    }
   }
 
-  // Refresh enrolments and studies when entering study selection
+  // ---- Refresh enrolments and studies when entering study selection ----
   if (S.phase === 'studySelect') {
-  if (S.availableStudies.length === 0) {
-    S.availableStudies = await apiFetchStudies();
+    if (S.availableStudies.length === 0) {
+      S.availableStudies = await apiFetchStudies();
+    }
+    if (S.participantCode) {
+      let enrolments = await apiGetMyEnrolments(S.participantCode);
+      // ── PATCH: Show studies with pending reflections/post‑survey as in_progress ──
+      const patchedEnrolments = [];
+      for (const enrol of enrolments) {
+        if (enrol.status === 'completed') {
+          // Check if this study has reflections or post‑survey
+          const config = await apiFetchStudyConfig(enrol.study_id);
+          if (config) {
+            const hasReflections = config.reflections && config.reflections.length > 0;
+            const hasPostSurvey = config.postSurveyFields && config.postSurveyFields.length > 0;
+            if (hasReflections || hasPostSurvey) {
+              // Load progress to see if all phases are done
+              let progress = null;
+              const local = loadLocalProgress ? loadLocalProgress() : null;
+              if (local) {
+                progress = local;
+              } else {
+                const remote = await apiLoadProgress(enrol.id);
+                if (remote?.progress) progress = remote.progress;
+              }
+              if (progress) {
+                const reflectionsDone = progress.metrics?.reflections ? progress.metrics.reflections.length : 0;
+                const totalReflections = config.reflections ? config.reflections.length : 0;
+                const postSurveyDone = progress.completedPhases?.postSurvey || false;
+                if (reflectionsDone < totalReflections || !postSurveyDone) {
+                  // Copy and change status locally
+                  const patched = { ...enrol, status: 'in_progress' };
+                  patchedEnrolments.push(patched);
+                  continue;
+                }
+              }
+            }
+          }
+        }
+        // Keep original if not patched
+        patchedEnrolments.push(enrol);
+      }
+      S.myEnrolments = patchedEnrolments;
+      await syncCompletionStatus();   // optional, keep if present
+    }
   }
-  if (S.participantCode) {
-    S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
-    await syncCompletionStatus();   // <-- this now runs every time
-  }
-}
 
+  // ---- Check for real progress in puzzle-based phases ----
   const needsProgress = ['pre','study','faded','attempt','reflect','code','review','post'];
   if (needsProgress.includes(S.phase)) {
-    const hasRealProgress = S.completedPhases.survey || S.completedPhases.pretest || S.completedPhases.puzzles || 
+    const hasRealProgress = S.completedPhases.survey || S.completedPhases.pretest || S.completedPhases.puzzles ||
                             (S.metrics && (Object.keys(S.metrics.puzzles || {}).length > 0 || S.metrics.preScore !== undefined));
     if (!hasRealProgress) {
       console.log('No progress, redirecting to orient');
       S.phase = 'orient';
     }
   }
+
+  // ---- Advance from pre-test if already completed ----
   if (S.phase === 'pre' && S.completedPhases.pretest) {
     S.phase = 'study';
     S.puzzleIdx = S.puzzlesCompletedCount;
   }
+
+  // ---- AUTO-ADVANCE FOR REFLECTIONS ----
+  if (S.phase === 'reflection') {
+    const total = (S.studyConfig?.reflections || []).length;
+    const idx = S.reflectionWeek || 0;
+    if (idx >= total) {
+      if (S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0) {
+        S.phase = 'postsurvey';
+      } else {
+        S.phase = 'debrief';
+      }
+    }
+  }
+
+  // ---- Render the appropriate view ----
   const app = document.getElementById('app');
   let html = '';
-  switch(S.phase){
+  switch (S.phase) {
     case 'hero': html = renderHero(); break;
     case 'register': html = renderRegister(); break;
     case 'studySelect': html = renderStudySelect(); break;
     case 'resumeSelect': html = renderResumeSelect(); break;
     case 'orient': html = renderOrient(); break;
     case 'consent': html = renderConsent(); break;
+    case 'reflection': html = renderReflectionDynamic(); break;
+    case 'postsurvey': html = renderPostSurveyDynamic(); break;
     case 'survey': html = renderSurveyDynamic(); break;
-    case 'pre': html = renderAssessmentDynamic('pre'); break;
+    case 'pre':
+  if (!S.studyConfig || !S.studyConfig.preQ || S.studyConfig.preQ.length === 0) {
+    S.phase = 'studySelect';
+    go();
+    return;
+  }
+  html = renderAssessmentDynamic('pre');
+  break;
     case 'study': html = renderStudyDynamic(); break;
     case 'faded': html = renderFadedDynamic(); break;
     case 'attempt': html = renderAttemptDynamic(); break;
     case 'reflect': html = renderReflectDynamic(); break;
     case 'code': html = renderCodeDynamic(); break;
     case 'review': html = renderReviewDynamic(); break;
-    case 'post': html = renderAssessmentDynamic('post'); break;
+    case 'post':
+  if (!S.studyConfig || !S.studyConfig.postQ || S.studyConfig.postQ.length === 0) {
+    // If no postQ, we should not be here – redirect to studySelect
+    S.phase = 'studySelect';
+    go();
+    return;
+  }
+  html = renderAssessmentDynamic('post');
+  break;
     case 'followup': html = renderFollowupDynamic(); break;
     case 'guided': html = renderGuided(); break;
     case 'debrief': html = renderDebrief(); break;
@@ -2373,8 +3236,10 @@ async function go() {
     default: html = '<div>Error</div>';
   }
   app.innerHTML = html;
-  el('btnTheme')?.addEventListener('click',()=>{ toggleTheme(); });
-  el('btnAudio')?.addEventListener('click',()=>{ S.audioOn = !S.audioOn; go(); });
+
+  // ---- Re‑attach top‑bar events ----
+  el('btnTheme')?.addEventListener('click', () => { toggleTheme(); });
+  el('btnAudio')?.addEventListener('click', () => { S.audioOn = !S.audioOn; go(); });
   el('btnOtherStudies')?.addEventListener('click', async () => {
     if (S.participantCode) {
       S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
@@ -2383,20 +3248,62 @@ async function go() {
     S.phase = 'studySelect';
     go();
   });
-  el('btnLangStudy')?.addEventListener('click',()=>{ if(S.studyConfig?.bilingual) { S.studyLang = S.studyLang === 'en' ? 'ha' : 'en'; saveLocalProgress(); go(); } });
-  el('btnWithdraw')?.addEventListener('click', async () => { if(confirm('Withdraw? Progress lost.')) { await apiWithdraw(S.currentEnrolmentId); localStorage.removeItem(getStorageKey()); S.phase='hero'; go(); } });
-  el('btnLogoutPortal')?.addEventListener('click', () => { if(confirm('Logout?')) { S.phase='hero'; S.participantCode=null; S.participantName=''; S.participantMatric=''; S.participantEmail=''; S.participantGender=''; S.currentEnrolmentId=null; S.currentStudyId=null; S.metrics=null; S.surveyAnswers={}; S.assAnswers=[]; go(); } });
-  const resetTimer = () => { if(S.currentEnrolmentId) resetTimeoutTimer(); };
-  window.addEventListener('click', resetTimer); window.addEventListener('keydown', resetTimer);
-  if (S.currentEnrolmentId && !['hero','studySelect','adminLogin'].includes(S.phase)) resetTimeoutTimer();
-  else if (S.timeoutInterval) clearInterval(S.timeoutInterval);
-  switch(S.phase){
+  el('btnLangStudy')?.addEventListener('click', () => {
+    if (S.studyConfig?.bilingual) {
+      S.studyLang = S.studyLang === 'en' ? 'ha' : 'en';
+      saveLocalProgress();
+      go();
+    }
+  });
+  el('btnWithdraw')?.addEventListener('click', async () => {
+    if (confirm('Withdraw? Progress lost.')) {
+      await apiWithdraw(S.currentEnrolmentId);
+      localStorage.removeItem(getStorageKey());
+      S.phase = 'hero';
+      go();
+    }
+  });
+  el('btnLogoutPortal')?.addEventListener('click', () => {
+    if (confirm('Logout?')) {
+      S.phase = 'hero';
+      S.participantCode = null;
+      S.participantName = '';
+      S.participantMatric = '';
+      S.participantEmail = '';
+      S.participantGender = '';
+      S.participantInstitution = '';
+      S.participantProgramme = '';
+      S.currentEnrolmentId = null;
+      S.currentStudyId = null;
+      S.metrics = null;
+      S.surveyAnswers = {};
+      S.assAnswers = [];
+      S.postSurveyAnswers = {};
+      S.reflectionWeek = 0;
+      go();
+    }
+  });
+
+  // ---- Timeout timer ----
+  const resetTimer = () => { if (S.currentEnrolmentId) resetTimeoutTimer(); };
+  window.addEventListener('click', resetTimer);
+  window.addEventListener('keydown', resetTimer);
+  if (S.currentEnrolmentId && !['hero','studySelect','adminLogin'].includes(S.phase)) {
+    resetTimeoutTimer();
+  } else if (S.timeoutInterval) {
+    clearInterval(S.timeoutInterval);
+  }
+
+  // ---- Bind phase‑specific events ----
+  switch (S.phase) {
     case 'hero': bindHero(); break;
     case 'register': bindRegister(); break;
     case 'studySelect': bindStudySelect(); break;
     case 'resumeSelect': bindResumeSelect(); break;
     case 'orient': bindOrient(); break;
     case 'consent': bindConsent(); break;
+    case 'reflection': bindReflectionDynamic(); break;
+    case 'postsurvey': bindPostSurveyDynamic(); break;
     case 'survey': bindSurveyDynamic(); break;
     case 'pre': bindAssessmentDynamic('pre'); break;
     case 'study': bindStudyDynamic(); break;
@@ -2405,7 +3312,12 @@ async function go() {
     case 'reflect': bindReflectDynamic(); break;
     case 'code': bindCodeDynamic(); break;
     case 'review': bindReviewDynamic(); break;
-    case 'post': bindAssessmentDynamic('post'); el('btnBackToStudies')?.addEventListener('click',()=>{ S.phase='studySelect'; go(); }); break;
+    case 'post': bindAssessmentDynamic('post');
+      el('btnBackToStudies')?.addEventListener('click', () => {
+        S.phase = 'studySelect';
+        go();
+      });
+      break;
     case 'followup': bindFollowupDynamic(); break;
     case 'guided': bindGuided(); break;
     case 'debrief': bindDebrief(); break;

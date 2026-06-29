@@ -424,3 +424,100 @@
   line-height: 1.6;
   margin: 12px 0;
 }
+
+/* ============================================================
+   ADDITIONS FOR THIRD STUDY (Professional Dispositions)
+   ============================================================ */
+
+/* Checkbox groups for survey (pre‑survey) */
+.checkbox-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+}
+.checkbox-group label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-weight: normal;
+  color: var(--text-color);
+}
+.checkbox-group input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+/* Reflection textareas (weekly reflections) */
+.ref-text {
+  width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1.5px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text-color);
+  font-family: inherit;
+  resize: vertical;
+  min-height: 80px;
+}
+.ref-text:focus {
+  border-color: var(--primary);
+  outline: none;
+}
+
+/* Participant info box (already has .pcode-box) – keep as is, ensure dark mode */
+.pcode-box {
+  background: var(--gray-50);
+  border-radius: 16px;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  color: var(--text-color);
+}
+.pcode-box p {
+  margin: 4px 0;
+}
+.pcode-box strong {
+  color: var(--primary);
+}
+.dark .pcode-box {
+  background: var(--gray-100);
+  border-color: var(--border);
+}
+
+/* Likert with extra "Not applicable" option – existing styles work fine, but we can add a small tweak for longer text */
+.lk-opt label {
+  font-size: 0.7rem;
+  line-height: 1.2;
+}
+.lk-opt {
+  min-width: 50px;
+}
+
+/* Ensure radio labels wrap correctly */
+.lk-opt input[type="radio"] {
+  width: 18px;
+  height: 18px;
+}
+
+/* Reflection waiting box (for locked reflections) */
+.reflection-waiting {
+  background: #fef9c3;
+  border-color: #facc15;
+  border-radius: 16px;
+  padding: 16px 20px;
+  margin: 16px 0;
+  border-left: 4px solid #facc15;
+  color: #1e293b; /* dark text for light mode */
+}
+.dark .reflection-waiting {
+  background: #713f12;  /* dark amber */
+  border-color: #facc15;
+  color: #fef08a;        /* light yellow text */
+}
+.dark .reflection-waiting strong {
+  color: #fef08a;
+}
