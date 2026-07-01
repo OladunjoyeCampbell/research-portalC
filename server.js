@@ -1,5 +1,6 @@
 // ══════════════════════════════════════════════════════════════
-//  Research Portal API – Full Feature Implementation (Improved)
+//  Research Portal API – Full Feature Implementation
+//  Includes ElevenLabs Hausa Text-to-Speech
 //  Serves frontend from /public folder (same origin)
 // ══════════════════════════════════════════════════════════════
 
@@ -8,18 +9,55 @@ require('dotenv').config();
 
 const dns = require('dns');
 if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv4first');
+// ============================================================
+// ElevenLabs Configuration
+// ============================================================
+
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+
+if (!ELEVENLABS_API_KEY) {
+    throw new Error("ELEVENLABS_API_KEY is missing from .env");
+}
+
+if (!ELEVENLABS_VOICE_ID) {
+    throw new Error("ELEVENLABS_VOICE_ID is missing from .env");
+}
 
 const express = require('express');
 const cors = require('cors');
 const session = require('express-session');
+
 const pg = require('pg');
 const pgSession = require('connect-pg-simple')(session);
+
 const { createClient } = require('@supabase/supabase-js');
-const { Resend } = require('resend');  // <-- NEW
+const { Resend } = require('resend');
+
+const axios = require('axios');          // ElevenLabs API
+const fs = require('fs');                // Cache audio files
+const crypto = require('crypto');        // Generate cache filenames
+
 const path = require('path');
 
 const app = express();
 app.set('trust proxy', 1);
+// ============================================================
+// ADDED: ElevenLabs audio cache folder
+// ============================================================
+
+const AUDIO_CACHE_DIR = path.join(
+    __dirname,
+    'public',
+    'audio',
+    'cache'
+);
+
+if (!fs.existsSync(AUDIO_CACHE_DIR)) {
+    fs.mkdirSync(AUDIO_CACHE_DIR, {
+        recursive: true
+    });
+}
 
 // CORS (allow localhost and Render origin)
 const allowedOrigins = [
@@ -31,6 +69,11 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '8mb' }));
+// ADDED: Support form-encoded request bodies
+app.use(express.urlencoded({
+  extended: true,
+  limit: '8mb'
+}));
 
 // Serve static frontend files from /public
 app.use(express.static(path.join(__dirname, 'public')));
@@ -660,6 +703,179 @@ app.post('/api/admin/send-reminders', requireAdmin, async (req, res) => {
   }
   await logAdminAction(req, 'send_reminders', 'study', studyId, { daysInactive, count: inactive.length, results });
   res.json({ total: inactive.length, results });
+});
+// ============================================================
+// ElevenLabs Hausa Text-to-Speech API
+// Cached version (recommended)
+// ============================================================
+
+app.post('/api/speak', async (req, res) => {
+
+    try {
+
+        // -------------------------------
+        // Validate input
+        // -------------------------------
+
+        const text = (req.body?.text || '').trim();
+
+        if (!text) {
+            return res.status(400).json({
+                success: false,
+                error: 'No text supplied.'
+            });
+        }
+
+        // -------------------------------
+        // Configuration
+        // -------------------------------
+
+        const MODEL_ID = 'eleven_multilingual_v2';
+
+        const VOICE_SETTINGS = {
+            stability: 0.50,
+            similarity_boost: 0.75
+        };
+
+        // -------------------------------
+        // Create cache filename
+        // Cache changes automatically if
+        // voice or model changes
+        // -------------------------------
+
+        const hash = crypto
+            .createHash('sha256')
+            .update(
+                ELEVENLABS_VOICE_ID +
+                "|" +
+                MODEL_ID +
+                "|" +
+                JSON.stringify(VOICE_SETTINGS) +
+                "|" +
+                text
+            )
+            .digest('hex');
+
+        const cacheFile = path.join(
+            AUDIO_CACHE_DIR,
+            `${hash}.mp3`
+        );
+
+        // -------------------------------
+        // Serve cached audio
+        // -------------------------------
+
+        if (fs.existsSync(cacheFile)) {
+
+            console.log(`[CACHE] ${text}`);
+
+            return res.sendFile(cacheFile);
+
+        }
+
+        console.log(`[TTS] ${text}`);
+
+        // -------------------------------
+        // Generate speech
+        // -------------------------------
+
+        const response = await axios({
+
+            method: 'POST',
+
+            url:
+                `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+
+            responseType: 'arraybuffer',
+
+            headers: {
+
+                'Accept': 'audio/mpeg',
+
+                'Content-Type': 'application/json',
+
+                'xi-api-key': ELEVENLABS_API_KEY
+
+            },
+
+            data: {
+
+                text,
+
+                model_id: MODEL_ID,
+
+                voice_settings: VOICE_SETTINGS
+
+            }
+
+        });
+
+        // -------------------------------
+        // Save to cache
+        // -------------------------------
+
+        fs.writeFileSync(
+            cacheFile,
+            response.data
+        );
+
+        console.log(
+            `[SAVED] ${path.basename(cacheFile)} (${response.data.length} bytes)`
+        );
+
+        // -------------------------------
+        // Return audio
+        // -------------------------------
+
+        res.setHeader('Content-Type', 'audio/mpeg');
+
+        res.setHeader(
+            'Cache-Control',
+            'public, max-age=31536000'
+        );
+
+        return res.send(response.data);
+
+    }
+
+    catch (err) {
+
+        console.log('\n====================================');
+        console.log('ELEVENLABS ERROR');
+        console.log('====================================');
+
+        console.log('Voice ID:', ELEVENLABS_VOICE_ID);
+
+        console.log('Status:', err.response?.status);
+
+        console.log('Message:', err.message);
+
+        if (Buffer.isBuffer(err.response?.data)) {
+
+            console.log(err.response.data.toString());
+
+        } else {
+
+            console.log(err.response?.data);
+
+        }
+
+        console.log('====================================\n');
+
+        return res.status(500).json({
+
+            success: false,
+
+            error: 'Speech generation failed.',
+
+            detail: Buffer.isBuffer(err.response?.data)
+                ? err.response.data.toString()
+                : err.response?.data
+
+        });
+
+    }
+
 });
 
 

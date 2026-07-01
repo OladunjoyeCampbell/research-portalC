@@ -80,7 +80,7 @@ function L(obj, key) {
   if (typeof obj === 'string') return obj;
   return obj?.[key+'_en'] ?? obj?.[key] ?? '';
 }
-function speak(text) {
+/*function speak(text) {
   if(!S.audioOn || !window.speechSynthesis) return;
   try {
     speechSynthesis.cancel();
@@ -89,6 +89,115 @@ function speak(text) {
     u.rate = 0.9;
     speechSynthesis.speak(u);
   } catch(e) { console.warn(e); }
+} 
+*/
+
+// ============================================================
+// UPDATED: Speak using ElevenLabs for Hausa,
+// Browser speech for English
+// ============================================================
+
+let currentAudio = null;
+
+async function speak(text) {
+
+    if (!S.audioOn || !text) return;
+
+    // Stop any browser speech
+    if (window.speechSynthesis) {
+        speechSynthesis.cancel();
+    }
+
+    // Stop previous ElevenLabs audio
+    if (currentAudio) {
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+    }
+
+    // ----------------------------
+    // English → Browser speech
+    // ----------------------------
+
+    if (S.studyLang !== 'ha') {
+
+        if (!window.speechSynthesis) return;
+
+        const u = new SpeechSynthesisUtterance(text);
+
+        u.lang = 'en-GB';
+
+        u.rate = 0.9;
+
+        speechSynthesis.speak(u);
+
+        return;
+    }
+
+    // ----------------------------
+    // Hausa → ElevenLabs
+    // ----------------------------
+
+    try {
+
+        const response = await fetch('/api/speak', {
+
+            method: 'POST',
+
+            headers: {
+
+                'Content-Type': 'application/json'
+
+            },
+
+            body: JSON.stringify({
+
+                text
+
+            })
+
+        });
+
+        if (!response.ok)
+            throw new Error("Unable to generate speech.");
+
+        const blob = await response.blob();
+
+        const url = URL.createObjectURL(blob);
+
+        currentAudio = new Audio(url);
+
+        currentAudio.onended = () => {
+
+            URL.revokeObjectURL(url);
+
+            currentAudio = null;
+
+        };
+
+        currentAudio.play();
+
+    }
+
+    catch (err) {
+
+        console.error(err);
+
+        // Fallback to browser speech
+
+        if (window.speechSynthesis) {
+
+            const u = new SpeechSynthesisUtterance(text);
+
+            u.lang = 'ha';
+
+            u.rate = 0.9;
+
+            speechSynthesis.speak(u);
+
+        }
+
+    }
+
 }
 function showSavedToast(msg) {
   let d = document.querySelector('.saved-toast');
