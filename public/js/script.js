@@ -3312,13 +3312,13 @@ async function go() {
     case 'postsurvey': html = renderPostSurveyDynamic(); break;
     case 'survey': html = renderSurveyDynamic(); break;
     case 'pre':
-  if (!S.studyConfig || !S.studyConfig.preQ || S.studyConfig.preQ.length === 0) {
-    S.phase = 'studySelect';
-    go();
-    return;
-  }
-  html = renderAssessmentDynamic('pre');
-  break;
+      if (!S.studyConfig || !S.studyConfig.preQ || S.studyConfig.preQ.length === 0) {
+        S.phase = 'studySelect';
+        go();
+        return;
+      }
+      html = renderAssessmentDynamic('pre');
+      break;
     case 'study': html = renderStudyDynamic(); break;
     case 'faded': html = renderFadedDynamic(); break;
     case 'attempt': html = renderAttemptDynamic(); break;
@@ -3326,14 +3326,13 @@ async function go() {
     case 'code': html = renderCodeDynamic(); break;
     case 'review': html = renderReviewDynamic(); break;
     case 'post':
-  if (!S.studyConfig || !S.studyConfig.postQ || S.studyConfig.postQ.length === 0) {
-    // If no postQ, we should not be here – redirect to studySelect
-    S.phase = 'studySelect';
-    go();
-    return;
-  }
-  html = renderAssessmentDynamic('post');
-  break;
+      if (!S.studyConfig || !S.studyConfig.postQ || S.studyConfig.postQ.length === 0) {
+        S.phase = 'studySelect';
+        go();
+        return;
+      }
+      html = renderAssessmentDynamic('post');
+      break;
     case 'followup': html = renderFollowupDynamic(); break;
     case 'guided': html = renderGuided(); break;
     case 'debrief': html = renderDebrief(); break;
@@ -3346,7 +3345,59 @@ async function go() {
   }
   app.innerHTML = html;
 
-  // ---- Re‑attach top‑bar events ----
+  // ============================================================
+  //  EVENT DELEGATION – ensures all buttons work even after re‑render
+  // ============================================================
+  // Remove any previous delegated listener to avoid duplicates
+  const oldListener = app._delegatedListener;
+  if (oldListener) {
+    app.removeEventListener('click', oldListener);
+  }
+
+  const delegatedHandler = function(e) {
+    const target = e.target.closest('button');
+    if (!target) return;
+
+    // --- Handle by ID ---
+    const id = target.id;
+    switch (id) {
+      case 'btnStartFollowup':
+        e.preventDefault();
+        S.assMode = 'post';
+        S.assQ = 0;
+        S.assAnswers = [];
+        S.phase = 'followup';
+        go();
+        return;
+
+      case 'btnBackToStudies':
+      case 'btnDebriefBack':
+        e.preventDefault();
+        S.studyConfig = null;
+        S.phase = 'studySelect';
+        go();
+        return;
+
+      // You can add more buttons here if needed, e.g.:
+      // case 'btnLogoutPortal': ... but logout is already bound below
+
+      default:
+        // Optional: handle via data-action attribute
+        const action = target.dataset.action;
+        if (action === 'back-to-studies') {
+          e.preventDefault();
+          S.studyConfig = null;
+          S.phase = 'studySelect';
+          go();
+          return;
+        }
+    }
+  };
+
+  app.addEventListener('click', delegatedHandler);
+  app._delegatedListener = delegatedHandler;
+
+  // ---- Re‑attach top‑bar events (these are bound directly) ----
   el('btnTheme')?.addEventListener('click', () => { toggleTheme(); });
   el('btnAudio')?.addEventListener('click', () => { S.audioOn = !S.audioOn; go(); });
   el('btnOtherStudies')?.addEventListener('click', async () => {
@@ -3404,6 +3455,7 @@ async function go() {
   }
 
   // ---- Bind phase‑specific events ----
+  // (These now only handle events not covered by delegation, or they remain for clarity)
   switch (S.phase) {
     case 'hero': bindHero(); break;
     case 'register': bindRegister(); break;
@@ -3422,6 +3474,8 @@ async function go() {
     case 'code': bindCodeDynamic(); break;
     case 'review': bindReviewDynamic(); break;
     case 'post': bindAssessmentDynamic('post');
+      // The delegated handler already covers btnBackToStudies, so this is optional.
+      // Keep for backwards compatibility.
       el('btnBackToStudies')?.addEventListener('click', () => {
         S.phase = 'studySelect';
         go();
