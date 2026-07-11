@@ -883,7 +883,12 @@ function bindResume() {
       go();
       return;
     } else {
-      S.phase = 'survey';
+      // ── FIX: Check if consent has already been given ──
+      if (S.consentGeneral) {
+        S.phase = 'survey';
+      } else {
+        S.phase = 'consent';
+      }
       go();
       return;
     }
@@ -917,7 +922,12 @@ function bindResume() {
         go();
         return;
       } else {
-        S.phase = 'survey';
+        // ── FIX: Check if consent has already been given ──
+        if (S.consentGeneral) {
+          S.phase = 'survey';
+        } else {
+          S.phase = 'consent';
+        }
         go();
         return;
       }
@@ -1058,7 +1068,6 @@ function bindResume() {
           S.phase = 'pre';
           S.assMode = 'pre';
           S.assQ = S.assAnswers.length || 0;
-          // ✅ ADDED: Explicit go() call
           go();
           return;
         } else if (hasPost2) {
@@ -1781,6 +1790,86 @@ function bindSurveyDynamic() {
   const btn = el('btnSurveyNext');
   if (btn) btn.disabled = true;
 
+  // ── Find gender field ──
+  const genderField = fields.find(f => f.id === 'gender' || f.id === 'demographics_gender');
+
+  // ── Get gender options from the field ──
+  let genderOptions = [];
+  if (genderField) {
+    genderOptions = L(genderField, 'options') || [];
+  }
+
+  // ── Validate gender mismatch ──
+  function validateGender() {
+    if (!genderField) return true;
+    
+    const surveyGenderValue = S.surveyAnswers[genderField.id];
+    const enrolmentGender = S.participantGender;
+    
+    // If no survey answer yet, skip validation
+    if (surveyGenderValue === undefined || surveyGenderValue === null || surveyGenderValue === '') return true;
+    
+    // If enrolment gender is empty, skip validation
+    if (!enrolmentGender) return true;
+    
+    // ── Convert survey value to label ──
+    let surveyGenderLabel = '';
+    const surveyValueNum = parseInt(surveyGenderValue);
+    if (!isNaN(surveyValueNum) && surveyValueNum >= 0 && surveyValueNum < genderOptions.length) {
+      surveyGenderLabel = genderOptions[surveyValueNum];
+    } else {
+      surveyGenderLabel = String(surveyGenderValue);
+    }
+    
+    // Check if they match (case-insensitive)
+    const isMatch = surveyGenderLabel.toLowerCase() === enrolmentGender.toLowerCase();
+    
+    // Show/hide warning message
+    let warningEl = document.getElementById('genderWarning');
+    
+    if (!warningEl) {
+      warningEl = document.createElement('div');
+      warningEl.id = 'genderWarning';
+      
+      // ── Dark mode aware styles ──
+      const isDark = document.documentElement.classList.contains('dark');
+      warningEl.style.cssText = `
+        background: ${isDark ? '#451a03' : '#fef3c7'};
+        border: 1px solid ${isDark ? '#d97706' : '#f59e0b'};
+        border-radius: 12px;
+        padding: 12px 16px;
+        margin: 12px 0;
+        display: none;
+        font-size: 0.95rem;
+        color: ${isDark ? '#fbbf24' : '#78350f'};
+      `;
+      
+      // Insert after the gender field
+      const genderFieldEl = document.querySelector(`[data-field="${genderField.id}"]`)?.closest('.field-row');
+      if (genderFieldEl) {
+        genderFieldEl.after(warningEl);
+      } else {
+        const actionsEl = document.querySelector('.actions');
+        if (actionsEl) {
+          actionsEl.before(warningEl);
+        }
+      }
+    }
+    
+    if (!isMatch) {
+      warningEl.style.display = 'block';
+      warningEl.innerHTML = `
+        <strong>⚠️ Gender Mismatch</strong><br>
+        You selected <strong>${surveyGenderLabel}</strong> in the survey, but you registered as <strong>${enrolmentGender}</strong> during enrolment.
+        <br><small>If this is a mistake, please select the correct option above. If you need to update your enrolment record, please contact the researcher.</small>
+      `;
+      return false;
+    } else {
+      warningEl.style.display = 'none';
+      return true;
+    }
+  }
+
   const updateBtn = () => {
     // Capture selections
     document.querySelectorAll('.sv-sel').forEach(sel => {
@@ -1807,6 +1896,9 @@ function bindSurveyDynamic() {
       }
     });
 
+    // ── Validate gender ──
+    const isGenderValid = validateGender();
+
     // Check required fields (skip 'programme' and sections)
     const requiredFields = fields.filter(f => f.id && f.id !== 'programme' && f.type !== 'section');
     const allFilled = requiredFields.every(f => {
@@ -1819,10 +1911,18 @@ function bindSurveyDynamic() {
       }
     });
 
-    if (btn) btn.disabled = !allFilled;
+    // Button is enabled only if all fields are filled AND gender is valid
+    if (btn) btn.disabled = !(allFilled && isGenderValid);
+    
     const msg = el('surveyMsg');
     if (msg) {
-      msg.textContent = allFilled ? '' : (S.lang === 'en' ? 'Please answer all questions.' : 'Don Allah amsa duk tambayoyin.');
+      if (!allFilled) {
+        msg.textContent = S.lang === 'en' ? 'Please answer all questions.' : 'Don Allah amsa duk tambayoyin.';
+      } else if (!isGenderValid) {
+        msg.textContent = '⚠️ Please correct the gender mismatch before continuing.';
+      } else {
+        msg.textContent = '';
+      }
     }
   };
 
@@ -1868,6 +1968,17 @@ function bindSurveyDynamic() {
     });
   });
 
+  // ── Also re-validate when gender field changes (for dropdown) ──
+  if (genderField) {
+    const genderSelect = document.querySelector(`[data-field="${genderField.id}"]`);
+    if (genderSelect) {
+      genderSelect.addEventListener('change', () => {
+        // Small delay to let the value be captured
+        setTimeout(updateBtn, 50);
+      });
+    }
+  }
+
   updateBtn();
 
   // Submit / Continue
@@ -1891,6 +2002,18 @@ function bindSurveyDynamic() {
         S.surveyAnswers[field] = S.surveyAnswers[field].filter(v => v !== chk.value);
       }
     });
+    
+    // ── Final gender validation before submission ──
+    const isGenderValid = validateGender();
+    if (!isGenderValid) {
+      const msg = el('surveyMsg');
+      if (msg) msg.textContent = '⚠️ Please correct the gender mismatch before continuing.';
+      // Scroll to the warning
+      const warningEl = document.getElementById('genderWarning');
+      if (warningEl) warningEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return; // Stop submission
+    }
+
     saveLocalProgress();
 
     S.completedPhases.survey = true;
