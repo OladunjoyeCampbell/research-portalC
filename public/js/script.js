@@ -2143,7 +2143,7 @@ function renderReflectionDynamic() {
 }
 
 function bindReflectionDynamic() {
-  // Save answers on change (radio / text)
+  // Save answers on change (radio / text) – unchanged
   document.querySelectorAll('.ref-text').forEach(el => {
     el.addEventListener('input', () => {
       const idx = S.reflectionWeek;
@@ -2165,19 +2165,42 @@ function bindReflectionDynamic() {
     });
   });
 
-  // Submit button
+  // ── Submit button with DOM capture ──
   el('btnReflectSubmit')?.addEventListener('click', () => {
     const idx = S.reflectionWeek;
     const fields = S.studyConfig.reflections[idx].fields;
+
+    // ── Capture all answers from DOM before validation ──
+    // This ensures radio selections are captured even if the change event didn't fire
+    document.querySelectorAll('.ref-text').forEach(el => {
+      const fieldId = el.dataset.field;
+      if (!S.metrics.reflections) S.metrics.reflections = [];
+      if (!S.metrics.reflections[idx]) S.metrics.reflections[idx] = {};
+      S.metrics.reflections[idx][fieldId] = el.value.trim();
+    });
+    document.querySelectorAll('.ref-lk:checked').forEach(el => {
+      const fieldId = el.dataset.field;
+      if (!S.metrics.reflections) S.metrics.reflections = [];
+      if (!S.metrics.reflections[idx]) S.metrics.reflections[idx] = {};
+      S.metrics.reflections[idx][fieldId] = el.value;
+    });
+
+    // ── Now validate using the freshly captured answers ──
     const answers = S.metrics.reflections?.[idx] || {};
-    // Check required fields (only those with "required": true)
     const requiredFields = fields.filter(f => f.required === true);
-    const missing = requiredFields.filter(f => !answers[f.id] || answers[f.id].trim() === '');
+    const missing = requiredFields.filter(f => {
+      const val = answers[f.id];
+      // Check for undefined, null, or empty string (after trim)
+      return val === undefined || val === null || val === '' || val.trim() === '';
+    });
+
     if (missing.length) {
-      document.getElementById('reflectionMsg').textContent = 'Please answer all required questions.';
+      const msg = document.getElementById('reflectionMsg');
+      if (msg) msg.textContent = 'Please answer all required questions.';
       return;
     }
-    // Set start date if not set
+
+    // ── Set start date if not set ──
     if (!S.metrics.reflectionStartDate) {
       S.metrics.reflectionStartDate = Date.now();
     }
@@ -2185,7 +2208,7 @@ function bindReflectionDynamic() {
     saveLocalProgress();
     // Advance to next week and save immediately
     S.reflectionWeek = idx + 1;
-    saveLocalProgress();   // <-- CRITICAL FIX: ensure the new week is persisted
+    saveLocalProgress();
     go();
   });
 
