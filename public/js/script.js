@@ -289,27 +289,38 @@ async function syncCompletionStatus() {
 }
 
 function isReflectionAvailable(idx) {
-  const startDate = new Date(S.metrics?.reflectionStartDate || Date.now());
-  const daysCumulative = S.studyConfig?.reflectionDays || [];
-  let cumulative = 0;
-  for (let i = 0; i <= idx; i++) {
-    cumulative += daysCumulative[i] || 0;
-  }
-  const availableDate = new Date(startDate);
-  availableDate.setDate(availableDate.getDate() + cumulative);
+  const availableDate = getReflectionAvailableDate(idx);
   return new Date() >= availableDate;
 }
 
 function getReflectionAvailableDate(idx) {
-  const startDate = new Date(S.metrics?.reflectionStartDate || Date.now());
-  const daysCumulative = S.studyConfig?.reflectionDays || [];
+  // Week 1 (index 0) is always available immediately
+  if (idx === 0) return new Date();
+
+  // ── 1. Time‑locked date ──
+  const startDate = new Date(S.metrics?.studyStartDate || Date.now());
+  const daysCumulative = S.studyConfig?.reflectionDays || [0, 7, 7, 7];
   let cumulative = 0;
   for (let i = 0; i <= idx; i++) {
     cumulative += daysCumulative[i] || 0;
   }
-  const availableDate = new Date(startDate);
-  availableDate.setDate(availableDate.getDate() + cumulative);
-  return availableDate;
+  const timeLockedDate = new Date(startDate);
+  timeLockedDate.setDate(timeLockedDate.getDate() + cumulative);
+
+  // ── 2. Submission‑locked date ──
+  const prev = S.metrics?.reflections?.[idx - 1]?._submittedAt;
+  let submissionLockedDate = null;
+  if (prev) {
+    const cooldown = S.studyConfig?.reflectionCooldownDays ?? 7;
+    submissionLockedDate = new Date(prev);
+    submissionLockedDate.setDate(submissionLockedDate.getDate() + cooldown);
+  }
+
+  // ── 3. Availability = the later of the two ──
+  if (submissionLockedDate && submissionLockedDate > timeLockedDate) {
+    return submissionLockedDate;
+  }
+  return timeLockedDate;
 }
 // ============================================================
 // LOCALSTORAGE KEYS
@@ -391,10 +402,9 @@ function loadLocalProgress() {
     S.surveyAnswers = saved.surveyAnswers || {};
     S.postSurveyAnswers = saved.postSurveyAnswers || {};
     S.assAnswers = saved.assAnswers || [];
-    S.completedPhases = saved.completedPhases || { 
-      survey: false, pretest: false, puzzles: false, posttest: false, followup: false, postSurvey: false 
+    S.completedPhases = saved.completedPhases || {
+      survey: false, pretest: false, puzzles: false, posttest: false, followup: false, postSurvey: false
     };
-    // Ensure the new flag exists even if old data doesn't have it
     if (S.completedPhases.postSurvey === undefined) {
       S.completedPhases.postSurvey = false;
     }
@@ -403,8 +413,50 @@ function loadLocalProgress() {
     S.postTestPending = saved.postTestPending || false;
     S.gradeConsent = saved.gradeConsent || false;
     S.reflectionWeek = saved.reflectionWeek || 0;
+
+    // ── Restore studyStartDate if missing ──
+    if (!S.metrics) S.metrics = {};
+    if (!S.metrics.studyStartDate && S.metrics.reflections && S.metrics.reflections.length > 0) {
+      const first = S.metrics.reflections[0]?._submittedAt;
+      if (first) {
+        S.metrics.studyStartDate = new Date(first);
+      } else {
+        S.metrics.studyStartDate = Date.now();
+      }
+      saveLocalProgress();
+    }
+
+    // ── Backfill _submittedAt for legacy reflections ──
+    if (S.metrics?.reflections && Array.isArray(S.metrics.reflections)) {
+      const startDate = S.metrics.studyStartDate ? new Date(S.metrics.studyStartDate) : new Date();
+      const reflectionDays = S.studyConfig?.reflectionDays || [0, 7, 7, 7];
+      let updated = false;
+      S.metrics.reflections.forEach((ref, idx) => {
+        if (ref && typeof ref === 'object' && !ref._submittedAt) {
+          // Check if this reflection has any actual answer (not just empty)
+          const hasAnswers = Object.keys(ref).some(k => k !== '_submittedAt' && ref[k] !== undefined && ref[k] !== '');
+          if (hasAnswers) {
+            const estimatedDate = new Date(startDate);
+            let cumulative = 0;
+            for (let i = 0; i <= idx; i++) {
+              cumulative += reflectionDays[i] || 7;
+            }
+            estimatedDate.setDate(estimatedDate.getDate() + cumulative);
+            S.metrics.reflections[idx]._submittedAt = estimatedDate.getTime();
+            updated = true;
+          }
+        }
+      });
+      if (updated) {
+        saveLocalProgress();
+      }
+    }
+
     return saved;
-  } catch(e) { console.warn('Failed to parse saved progress', e); return null; }
+  } catch(e) {
+    console.warn('Failed to parse saved progress', e);
+    return null;
+  }
 }
 
 async function patchEnrolmentStatus(enrolments) {
@@ -582,26 +634,30 @@ function topbarHTML() {
     ? `<div style="font-size:0.8rem; color:var(--primary); margin-top:4px;">📖 ${S.studyConfig.title_en}</div>` 
     : '';
 
-  // Determine if there are any other unenrolled studies (for "Other studies" button)
   const hasOtherStudies = S.availableStudies.some(study => 
-  !S.myEnrolments.some(e => e.study_id === study.id && 
-    (e.status === 'enrolled' || e.status === 'in_progress' || e.status === 'completed')
-  )
-);
+    !S.myEnrolments.some(e => e.study_id === study.id && 
+      (e.status === 'enrolled' || e.status === 'in_progress' || e.status === 'completed')
+    )
+  );
+  
   return `<div class="topbar">
-    <div class="brand">
-      <h1>🔬 Research Portal</h1>
-      <p>Multi‑study research participation hub</p>
-      ${studyContext}
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-name">
+          Dr Oladele Campbell
+          <small>Research Portal</small>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <button class="pill" id="btnTheme">${themeIcon} ${themeText}</button>
+        <button class="pill ${S.audioOn?'pill-green':'pill-gray'}" id="btnAudio">${S.audioOn?'🔊':'🔇'} Audio</button>
+        ${insideStudy && hasOtherStudies ? `<button class="pill pill-amber" id="btnOtherStudies">📚 Other studies</button>` : ''}
+        ${S.studyConfig?.bilingual === true && insideStudy ? `<button class="pill pill-blue" id="btnLangStudy">${S.studyLang === 'en' ? 'Hausa' : 'English'}</button>` : ''}
+        ${insideStudy && S.currentEnrolmentId ? `<button class="pill pill-danger" id="btnWithdraw">🚪 Withdraw & Delete Data</button>` : ''}
+        ${S.phase !== 'hero' && !S.isAdminMode ? `<button class="pill pill-gray" id="btnLogoutPortal">🚪 Logout</button>` : ''}
+      </div>
     </div>
-    <div class="topbar-btns">
-      <button class="pill" id="btnTheme">${themeIcon} ${themeText}</button>
-      <button class="pill ${S.audioOn?'pill-green':'pill-gray'}" id="btnAudio">${S.audioOn?'🔊':'🔇'} Audio</button>
-      ${insideStudy && hasOtherStudies ? `<button class="pill pill-amber" id="btnOtherStudies">📚 Other studies</button>` : ''}
-      ${S.studyConfig?.bilingual === true && insideStudy ? `<button class="pill pill-blue" id="btnLangStudy">${S.studyLang === 'en' ? 'Hausa' : 'English'}</button>` : ''}
-      ${insideStudy && S.currentEnrolmentId ? `<button class="pill pill-danger" id="btnWithdraw">🚪 Withdraw & Delete Data</button>` : ''}
-      ${S.phase !== 'hero' && !S.isAdminMode ? `<button class="pill pill-gray" id="btnLogoutPortal">🚪 Logout</button>` : ''}
-    </div>
+    ${studyContext}
   </div>`;
 }
 function phaseStripHTML() {
@@ -637,54 +693,160 @@ function phaseStripHTML() {
   }).join('')}<span class="phase-label">${phases[currentIndex].label}</span></div>`;
 }
 function renderHero() {
-  return `${topbarHTML()}
-  <div class="main-card hero-container">
-    <div class="hero-badge">🔬 Multi‑Study Research Platform</div>
-    <h1 class="hero-title">Research Participation Portal</h1>
-    <p class="hero-subtitle">Contribute to Computing Education Research</p>
-    <div class="hero-features">
-      <div class="feature">✓ Multiple studies – choose any that interest you</div>
-      <div class="feature">✓ Secure and confidential</div>
-      <div class="feature">✓ Ethics approved (REC/NSPoly/CS/2026/___ )</div>
-      <div class="feature">✓ Takes about 30–40 minutes per study</div>
-      <div class="feature">✓ Receive participation certificate per study</div>
-    </div>
-    <div class="hero-buttons">
-      <button class="btn btn-primary btn-large" id="btnStartParticipation">▶ Start Participation</button>
-      <button class="btn btn-secondary btn-large" id="btnResumeExisting">↻ Resume Existing Study</button>
-      <button class="btn btn-secondary btn-large" id="btnMyCertificates">📜 My Certificates</button>
-    </div>
-    <div id="resumePanel" style="display: none; margin-top: 30px; border-top: 2px solid var(--border); padding-top: 24px;">
-      <h3>Resume your study</h3>
-      <p>Enter your participant code (e.g., AL-7X3K9) to pick up where you left off.</p>
-      <div class="input-row" style="max-width: 300px;"><input type="text" id="resumeCode" placeholder="Participant code" /></div>
-      <p id="resumeErr" style="color:var(--danger);text-align:center"></p>
-      <div class="actions"><button class="btn btn-primary" id="btnDoResume">Resume →</button></div>
-    </div>
-    <div class="admin-link">
-      <a href="?admin">🔐 Admin</a>
-    </div>
-  </div>`;
-}
+  // ── Build study cards ──
+  const studyCards = S.availableStudies.length > 0
+    ? S.availableStudies.map(study => {
+        const isBilingual = !!study.title_ha;
+        const langLabel = isBilingual ? 'EN / HA' : 'EN';
+        const estTime = study.estimated_time || '30';
+        return `
+          <div class="card">
+            <div class="card-top">
+              <h3>${study.title_en}</h3>
+              <span class="card-status">${study.status === 'open' ? 'Open' : 'Closed'}</span>
+            </div>
+            <p>${study.description_en || 'Participate in this research study.'}</p>
+            <div class="card-facts">
+              <span>~${estTime} min</span>
+              <span>${langLabel}</span>
+              <span>Solo</span>
+            </div>
+            <button class="card-cta" data-study-id="${study.id}">Learn more &amp; enrol →</button>
+          </div>
+        `;
+      }).join('')
+    : `<div class="card"><p>No studies currently available. Please check back later.</p></div>`;
 
+  return `${topbarHTML()}
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <div class="eyebrow">🔬 Computing education research · Niger State Polytechnic</div>
+        <h1 class="headline">Dr Oladele Campbell’s Research Portal</h1>
+        <p class="lede">Empowering computing education research through participation. Your 20–40 minutes helps design better teaching for students like you.</p>
+        <div class="hero-ctas">
+          <button class="btn btn-primary" id="btnStartParticipation">▶ Start Participation</button>
+          <button class="btn btn-ghost" id="btnResumeExisting">↻ Resume Existing Study</button>
+          <button class="btn btn-ghost" id="btnMyCertificates">📜 My Certificates</button>
+        </div>
+        <div class="hero-meta">
+          <span><span class="dot-gold"></span> NDPR‑compliant data handling</span>
+          <span><span class="dot-gold"></span> Withdraw &amp; delete anytime</span>
+          <span><span class="dot-gold"></span> Fully anonymous participation</span>
+        </div>
+        <div id="resumePanel" style="display: none; margin-top: 30px; border-top: 2px solid var(--line); padding-top: 20px;">
+          <h3>Resume your study</h3>
+          <p>Enter your participant code (e.g., AL-7X3K9) to pick up where you left off.</p>
+          <div style="display:flex; gap:12px; flex-wrap:wrap; max-width:400px;">
+            <input type="text" id="resumeCode" placeholder="Participant code" style="flex:1; padding:10px; border-radius:40px; border:1.5px solid var(--line);">
+            <button class="btn btn-primary" id="btnDoResume">Resume →</button>
+          </div>
+          <p id="resumeErr" style="color:var(--danger); text-align:center; margin-top:6px;"></p>
+        </div>
+      </div>
+      <div class="ladder" aria-hidden="true">
+        <div class="rung"><div class="rung-num">05</div><div><div class="rung-label">Debugging</div><div class="rung-sub">finding and fixing what breaks</div></div></div>
+        <div class="rung"><div class="rung-num">04</div><div><div class="rung-label">Functions</div><div class="rung-sub">naming a plan you can reuse</div></div></div>
+        <div class="rung"><div class="rung-num">03</div><div><div class="rung-label">Loops</div><div class="rung-sub">repeating with purpose</div></div></div>
+        <div class="rung"><div class="rung-num">02</div><div><div class="rung-label">Selection</div><div class="rung-sub">choosing between paths</div></div></div>
+        <div class="rung"><div class="rung-num">01</div><div><div class="rung-label">Sequence</div><div class="rung-sub">the first rung — what happens, in order</div></div></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="trust">
+    <div class="trust-inner">
+      <div class="trust-item"><span class="ico">◆</span> Affiliated with Niger State Polytechnic, Zungeru</div>
+      <div class="trust-item"><span class="ico">EN/HA</span> Some studies available in English and Hausa</div>
+      <div class="trust-item"><span class="ico">%</span> Your data never shared beyond the research team</div>
+    </div>
+  </div>
+
+  <section id="studies">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Active studies</div>
+        <h2>Choose a study that fits your time and interests</h2>
+        <p class="section-sub">
+          <strong>New participants:</strong> click a study to register and start.<br>
+          <strong>Already have a participant code?</strong> Use the <strong>“Resume Existing Study”</strong> button above.
+        </p>
+      </div>
+      <div class="studies">
+        ${studyCards}
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">How participation works</div>
+        <h2>Simple steps, flexible participation</h2>
+      </div>
+      <div class="journey">
+        <div class="journey-steps">
+          <div class="jstep"><div class="jnum">01</div><div><h4>Orient &amp; consent</h4><p>Read what the study asks of you in plain language, and give informed consent before anything is recorded.</p></div></div>
+          <div class="jstep"><div class="jnum">02</div><div><h4>Quick pre‑check</h4><p>A short baseline task, pre‑survey, or pre‑test – a starting point for the research.</p></div></div>
+          <div class="jstep"><div class="jnum">03</div><div><h4>Main activity</h4><p>The core of the study: a puzzle, survey, reflection, or coding task, paced by you.</p></div></div>
+          <div class="jstep"><div class="jnum">04</div><div><h4>Post‑test</h4><p>Where applicable, a post‑test or follow‑up to measure the impact of the study.</p></div></div>
+          <div class="jstep"><div class="jnum">05</div><div><h4>Debrief &amp; certificate</h4><p>We explain what the study was really testing, and you can download a certificate of participation.</p></div></div>
+          <div class="jstep"><div class="jnum">06</div><div><h4>Stay or step off</h4><p>Resume later, complete a study, or withdraw and delete your data – anytime.</p></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="impact">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Why it matters</div>
+        <h2>Research feeding directly back into how computing is taught</h2>
+      </div>
+      <div class="impact">
+        <div><div class="num">${S.availableStudies.length || '—'}</div><div class="lbl">active studies</div></div>
+        <div><div class="num">2</div><div class="lbl">languages, equally supported</div></div>
+        <div><div class="num">100%</div><div class="lbl">withdrawable, anonymous by default</div></div>
+        <div><div class="num">1</div><div class="lbl">shared goal: teaching that meets students where they are</div></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap footer-inner">
+      <span>© 2026 Dr Oladele Campbell · Dept of AI &amp; Machine Learning, Niger State Polytechnic, Zungeru</span>
+      <span><a href="#" id="btnAdminLink">🔐 Admin</a></span>
+    </div>
+  </footer>`;
+}
 function bindHero() {
+  // ── DOM refs ──
   const startBtn = document.getElementById('btnStartParticipation');
   const resumeBtn = document.getElementById('btnResumeExisting');
   const resumePanel = document.getElementById('resumePanel');
   const doResumeBtn = document.getElementById('btnDoResume');
+  const myCertsBtn = document.getElementById('btnMyCertificates');
+  const adminLink = document.getElementById('btnAdminLink');
 
+  // ── Initially hide resume panel ──
   if (resumePanel) resumePanel.style.display = 'none';
 
+  // ── Start Participation ──
   startBtn?.addEventListener('click', () => {
     S.phase = 'register';
     go();
   });
 
+  // ── Resume Existing Study (toggle panel) ──
   resumeBtn?.addEventListener('click', () => {
-    if (resumePanel) resumePanel.style.display = 'block';
-    resumePanel?.scrollIntoView({ behavior: 'smooth' });
+    if (resumePanel) {
+      const isVisible = resumePanel.style.display === 'block';
+      resumePanel.style.display = isVisible ? 'none' : 'block';
+      if (!isVisible) resumePanel.scrollIntoView({ behavior: 'smooth' });
+    }
   });
 
+  // ── Resume button (inside the panel) ──
   doResumeBtn?.addEventListener('click', async () => {
     const code = document.getElementById('resumeCode')?.value.trim().toUpperCase();
     if (!code) {
@@ -692,11 +854,11 @@ function bindHero() {
       return;
     }
     try {
-      // ── 1. Fetch enrolments ──
+      // 1. Fetch enrolments
       let enrolments = await apiGetMyEnrolments(code);
       if (!enrolments.length) throw new Error('No enrolments found for this code');
 
-      // ── 2. PATCH: Show studies with pending reflections/post‑survey as in_progress ──
+      // 2. Patch: Show studies with pending reflections/post‑survey as in_progress
       const patchedEnrolments = [];
       for (const enrol of enrolments) {
         if (enrol.status === 'completed') {
@@ -730,14 +892,14 @@ function bindHero() {
       }
       enrolments = patchedEnrolments;
 
-      // ── 3. Filter active (enrolled or in_progress) ──
+      // 3. Filter active (enrolled or in_progress)
       const active = enrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
       if (active.length === 0) {
         document.getElementById('resumeErr').innerText = 'You have no studies in progress. All are completed or withdrawn.';
         return;
       }
 
-      // ── 4. Set participant details ──
+      // 4. Set participant details
       const participant = active[0].participant || {};
       S.participantCode = code;
       S.participantName = participant.name || 'Participant';
@@ -747,7 +909,7 @@ function bindHero() {
       S.participantInstitution = participant.institution || '';
       S.participantProgramme = participant.programme || '';
 
-      // ── 5. Handle multiple active studies ──
+      // 5. Handle multiple active studies
       if (active.length > 1) {
         S.resumeCandidates = active;
         S.phase = 'resumeSelect';
@@ -755,7 +917,7 @@ function bindHero() {
         return;
       }
 
-      // ── 6. Single active study – proceed ──
+      // 6. Single active study – proceed
       const enrol = active[0];
       const config = await apiFetchStudyConfig(enrol.study_id);
       if (!config || !config.puzzles) throw new Error('Study configuration missing');
@@ -791,10 +953,32 @@ function bindHero() {
     }
   });
 
-  // New: My Certificates button
-  document.getElementById('btnMyCertificates')?.addEventListener('click', () => {
+  // ── My Certificates ──
+  myCertsBtn?.addEventListener('click', () => {
     S.phase = 'certificates';
     go();
+  });
+
+  // ── Study card clicks ──
+  document.querySelectorAll('.card-cta[data-study-id]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const studyId = parseInt(btn.dataset.studyId);
+      if (S.participantCode) {
+        // Already registered → go to study selection
+        S.phase = 'studySelect';
+        go();
+      } else {
+        // Not registered → go to registration
+        S.phase = 'register';
+        go();
+      }
+    });
+  });
+
+  // ── Admin link (footer) ──
+  adminLink?.addEventListener('click', (e) => {
+    e.preventDefault();
+    window.location.href = window.location.pathname + '?admin=true';
   });
 }
 
@@ -862,10 +1046,10 @@ function bindResume() {
     });
     return;
   }
+
   const continueBtn = document.getElementById('btnResumeContinue');
   const restartBtn = document.getElementById('btnResumeRestart');
 
-  // ── Determine study type (including reflections & post‑survey) ──
   const hasPre = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
   const hasPost = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
   const hasPuzzles = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
@@ -874,27 +1058,20 @@ function bindResume() {
 
   const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey;
 
-  console.log('bindResume init: hasReflections =', hasReflections, 'hasPostSurvey =', hasPostSurvey);
-
-  // ── Handle truly survey‑only studies ──
+  // ── Survey‑only studies ──
   if (isSurveyOnly) {
     if (S.completedPhases.survey) {
       S.phase = 'complete';
       go();
       return;
     } else {
-      // ── FIX: Check if consent has already been given ──
-      if (S.consentGeneral) {
-        S.phase = 'survey';
-      } else {
-        S.phase = 'consent';
-      }
+      S.phase = S.consentGeneral ? 'survey' : 'consent';
       go();
       return;
     }
   }
 
-  // ── Handle delayed post‑test waiting ──
+  // ── Delayed post‑test waiting ──
   if (S.postTestPending) {
     S.phase = 'complete';
     go();
@@ -903,198 +1080,49 @@ function bindResume() {
 
   // ── Continue button logic ──
   continueBtn?.addEventListener('click', () => {
-    console.log('🔍 Continue clicked: S.completedPhases =', S.completedPhases);
-    console.log('🔍 S._resumeState =', S._resumeState);
+    console.log('📌 Resume button clicked');
+    console.log('  consentGeneral:', S.consentGeneral);
+    console.log('  completedPhases.survey:', S.completedPhases.survey);
+    console.log('  hasReflections:', hasReflections);
+    console.log('  hasPostSurvey:', hasPostSurvey);
 
-    const hasPre2 = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
-    const hasPost2 = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
-    const hasPuzzles2 = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
-    const hasReflections2 = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
-    const hasPostSurvey2 = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
-
-    const isSurveyOnly2 = !hasPre2 && !hasPost2 && !hasPuzzles2 && !hasReflections2 && !hasPostSurvey2;
-
-    console.log('continueBtn: hasReflections2 =', hasReflections2, 'hasPostSurvey2 =', hasPostSurvey2);
-
-    if (isSurveyOnly2) {
-      if (S.completedPhases.survey) {
-        S.phase = 'complete';
-        go();
-        return;
-      } else {
-        // ── FIX: Check if consent has already been given ──
-        if (S.consentGeneral) {
-          S.phase = 'survey';
-        } else {
-          S.phase = 'consent';
-        }
-        go();
-        return;
-      }
-    }
-
-    const rs = S._resumeState || S.metrics?._resumeState;
-
-    // If immediate post‑test is already done, check for pending reflections/post‑survey
-    if (S.completedPhases.posttest) {
-      if (hasReflections2 || hasPostSurvey2) {
-        const reflectionsDone = S.metrics?.reflections ? S.metrics.reflections.length : 0;
-        const totalReflections = S.studyConfig?.reflections ? S.studyConfig.reflections.length : 0;
-        if (reflectionsDone < totalReflections) {
-          S.reflectionWeek = reflectionsDone;
-          S.phase = 'reflection';
-          go();
-          return;
-        } else if (hasPostSurvey2 && !S.completedPhases.postSurvey) {
-          S.phase = 'postsurvey';
-          go();
-          return;
-        }
-      }
-      S.phase = 'complete';
+    // ── 1. If consent is not given, go to consent ──
+    if (!S.consentGeneral) {
+      console.log('  → Consent not given – going to consent');
+      S.phase = 'consent';
       go();
       return;
     }
 
-    if (rs) {
-      if (rs.phase === 'survey' && S.completedPhases.survey) {
-        if (hasPre2) {
-          S.phase = 'pre';
-          S.assMode = 'pre';
-          S.assQ = 0;
-          S.assAnswers = [];
-        } else if (hasPost2) {
-          S.phase = 'post';
-          S.assMode = 'post';
-          S.assQ = 0;
-          S.assAnswers = [];
-        } else if (hasReflections2) {
-          const done = S.metrics?.reflections ? S.metrics.reflections.length : 0;
-          S.reflectionWeek = done;
-          S.phase = 'reflection';
-        } else if (hasPostSurvey2) {
-          S.phase = 'postsurvey';
-        } else {
-          S.phase = 'complete';
-        }
-      } else {
-        // ── RESTORE FROM SAVED RESUME STATE ──
-        S.phase = rs.phase || 'survey';
-        S.puzzleIdx = rs.puzzleIdx || 0;
-        S.assQ = rs.assQ || 0;
-        S.assAnswers = rs.assAnswers || [];
-        S.surveyAnswers = rs.surveyAnswers || {};
-        S.postSurveyAnswers = rs.postSurveyAnswers || {};
-        S.reviewQueue = rs.reviewQueue || [];
-        S.reviewIdx = rs.reviewIdx || 0;
-        S.available = rs.available || [];
-        S.userSeq = rs.userSeq || [];
-        S.fadedLocked = rs.fadedLocked || [];
-        
-        // ── IMPROVED REFLECTION WEEK RESTORATION ──
-        const savedReflectionWeek = rs.reflectionWeek;
-        if (savedReflectionWeek !== undefined && savedReflectionWeek !== null && savedReflectionWeek > 0) {
-          S.reflectionWeek = savedReflectionWeek;
-        } else {
-          // Fallback: compute from completed reflections
-          S.reflectionWeek = S.metrics?.reflections ? S.metrics.reflections.length : 0;
-        }
-        
-        // Restore completedPhases if stored
-        if (rs.completedPhases) {
-          S.completedPhases = { ...S.completedPhases, ...rs.completedPhases };
-        }
-      }
+    // ── 2. If consent is given but survey not done, go to survey ──
+    if (!S.completedPhases.survey) {
+      console.log('  → Consent given, survey not done – going to survey');
+      S.phase = 'survey';
+      go();
+      return;
+    }
+
+    // ── 3. Survey is done – decide next phase ──
+    console.log('  → Survey done – deciding next phase');
+    if (hasPre) {
+      S.phase = 'pre';
+      S.assMode = 'pre';
+      S.assQ = S.assAnswers.length || 0;
+    } else if (hasPost) {
+      S.phase = 'post';
+      S.assMode = 'post';
+      S.assQ = 0;
+      S.assAnswers = [];
+    } else if (hasReflections) {
+      const done = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+      S.reflectionWeek = done;
+      S.phase = 'reflection';
+    } else if (hasPostSurvey) {
+      S.phase = 'postsurvey';
+    } else if (S.completedPhases.posttest) {
+      S.phase = 'complete';
     } else {
-      // ── No resume state – determine phase from progress ──
-      console.log('⚠️ No resume state – determining from progress flags');
-      
-      if (S.completedPhases.posttest) {
-        if (hasReflections2 || hasPostSurvey2) {
-          const reflectionsDone = S.metrics?.reflections ? S.metrics.reflections.length : 0;
-          const totalReflections = S.studyConfig?.reflections ? S.studyConfig.reflections.length : 0;
-          if (reflectionsDone < totalReflections) {
-            S.reflectionWeek = reflectionsDone;
-            S.phase = 'reflection';
-            go();
-            return;
-          } else if (hasPostSurvey2 && !S.completedPhases.postSurvey) {
-            S.phase = 'postsurvey';
-            go();
-            return;
-          }
-        }
-        S.phase = 'complete';
-        go();
-        return;
-      }
-      if (S.completedPhases.puzzles && !S.completedPhases.posttest) {
-        const minDays = S.studyConfig?.min_days_between_pretest_posttest || 0;
-        if (minDays > 0 && S.metrics?.preCompletedAt) {
-          const daysSince = (Date.now() - new Date(S.metrics.preCompletedAt)) / (86400000);
-          if (daysSince < minDays) {
-            S.postTestPending = true;
-            S.phase = 'complete';
-            saveLocalProgress();
-            go();
-            return;
-          } else {
-            S.phase = 'post';
-            S.assMode = 'post';
-            S.assQ = 0;
-            S.assAnswers = [];
-            go();
-            return;
-          }
-        } else {
-          S.phase = 'post';
-          S.assMode = 'post';
-          S.assQ = 0;
-          S.assAnswers = [];
-          go();
-          return;
-        }
-      }
-      if (S.completedPhases.pretest && !S.completedPhases.puzzles) {
-        S.phase = 'study';
-        S.puzzleIdx = S.puzzlesCompletedCount || 0;
-        go();
-        return;
-      }
-      // ── FIX: Survey completed but pre‑test not started ──
-      if (S.completedPhases.survey && !S.completedPhases.pretest) {
-        console.log('✅ Survey done, pre‑test not started – going to pre‑test');
-        if (hasPre2) {
-          S.phase = 'pre';
-          S.assMode = 'pre';
-          S.assQ = S.assAnswers.length || 0;
-          go();
-          return;
-        } else if (hasPost2) {
-          S.phase = 'post';
-          S.assMode = 'post';
-          S.assQ = 0;
-          S.assAnswers = [];
-          go();
-          return;
-        } else if (hasReflections2) {
-          const done = S.metrics?.reflections ? S.metrics.reflections.length : 0;
-          S.reflectionWeek = done;
-          S.phase = 'reflection';
-          go();
-          return;
-        } else if (hasPostSurvey2) {
-          S.phase = 'postsurvey';
-          go();
-          return;
-        } else {
-          S.phase = 'complete';
-          go();
-          return;
-        }
-      }
-      // ── Fallback ──
-      console.log('⚠️ No progress found – starting from orient');
+      // For puzzle studies without pre/post tests (unlikely) – fallback
       S.phase = 'orient';
     }
     go();
@@ -2100,11 +2128,18 @@ function renderFields(fields, answers, title) {
 }
 
 function renderReflectionDynamic() {
+  // ── Set study start date once ──
+  if (!S.metrics) S.metrics = {};
+  if (!S.metrics.studyStartDate) {
+    S.metrics.studyStartDate = Date.now();
+    saveLocalProgress();
+  }
+
   const reflections = S.studyConfig.reflections || [];
   const total = reflections.length;
   const idx = S.reflectionWeek;
+
   if (idx >= total) {
-    // All done – show a button to go to post‑survey
     return `${topbarHTML()}<div class="main-card">
       <h2>Reflections Complete</h2>
       <p>You have completed all weekly reflections.</p>
@@ -2114,19 +2149,18 @@ function renderReflectionDynamic() {
 
   const weekData = reflections[idx];
   if (!isReflectionAvailable(idx)) {
-  const nextDate = getReflectionAvailableDate(idx);
-  return `${topbarHTML()}<div class="main-card">
-    <h2>✍️ ${weekData.title}</h2>
-    <div class="reflection-waiting">
-      <p>⏳ This reflection will be available on <strong>${formatDateDDMMYYYY(nextDate)}</strong>.</p>
-      <p>Please return then to continue.</p>
-    </div>
-    <div class="actions"><button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button></div>
-  </div>`;
-}
+    const nextDate = getReflectionAvailableDate(idx);
+    return `${topbarHTML()}<div class="main-card">
+      <h2>✍️ ${weekData.title}</h2>
+      <div class="reflection-waiting">
+        <p>⏳ This reflection will be available on <strong>${formatDateDDMMYYYY(nextDate)}</strong>.</p>
+        <p>Please return then to continue.</p>
+      </div>
+      <div class="actions"><button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button></div>
+    </div>`;
+  }
 
   const answers = S.metrics.reflections?.[idx] || {};
-  // Prefill participant info (name and matric) for display
   const participantInfo = `<div class="pcode-box" style="margin-bottom:20px;">
     <p><strong>Participant:</strong> ${escapeHtml(S.participantName || '')} (${escapeHtml(S.participantMatric || '')})</p>
     <p><strong>Participant code:</strong> ${escapeHtml(S.participantCode || '')}</p>
@@ -2141,9 +2175,8 @@ function renderReflectionDynamic() {
   </div>`;
   return html;
 }
-
 function bindReflectionDynamic() {
-  // Save answers on change (radio / text) – unchanged
+  // Save answers on change (radio / text)
   document.querySelectorAll('.ref-text').forEach(el => {
     el.addEventListener('input', () => {
       const idx = S.reflectionWeek;
@@ -2165,13 +2198,12 @@ function bindReflectionDynamic() {
     });
   });
 
-  // ── Submit button with DOM capture ──
+  // Submit button
   el('btnReflectSubmit')?.addEventListener('click', () => {
     const idx = S.reflectionWeek;
     const fields = S.studyConfig.reflections[idx].fields;
 
-    // ── Capture all answers from DOM before validation ──
-    // This ensures radio selections are captured even if the change event didn't fire
+    // Capture all answers from DOM
     document.querySelectorAll('.ref-text').forEach(el => {
       const fieldId = el.dataset.field;
       if (!S.metrics.reflections) S.metrics.reflections = [];
@@ -2185,12 +2217,10 @@ function bindReflectionDynamic() {
       S.metrics.reflections[idx][fieldId] = el.value;
     });
 
-    // ── Now validate using the freshly captured answers ──
     const answers = S.metrics.reflections?.[idx] || {};
     const requiredFields = fields.filter(f => f.required === true);
     const missing = requiredFields.filter(f => {
       const val = answers[f.id];
-      // Check for undefined, null, or empty string (after trim)
       return val === undefined || val === null || val === '' || val.trim() === '';
     });
 
@@ -2200,25 +2230,24 @@ function bindReflectionDynamic() {
       return;
     }
 
-    // ── Set start date if not set ──
-    if (!S.metrics.reflectionStartDate) {
-      S.metrics.reflectionStartDate = Date.now();
-    }
-    // Save current answers (already saved via change events, but ensure)
+    // ── Store submission timestamp ──
+    if (!S.metrics.reflections[idx]) S.metrics.reflections[idx] = {};
+    S.metrics.reflections[idx]._submittedAt = Date.now();
+
+    // Save and advance
     saveLocalProgress();
-    // Advance to next week and save immediately
     S.reflectionWeek = idx + 1;
     saveLocalProgress();
     go();
   });
 
-  // Continue to post‑survey (shown after all reflections done)
+  // Continue to post‑survey
   el('btnGoToPostSurvey')?.addEventListener('click', () => {
     S.phase = 'postsurvey';
     go();
   });
 
-  // Back to studies (for locked reflections)
+  // Back to studies
   el('btnBackToStudies')?.addEventListener('click', () => {
     S.phase = 'studySelect';
     go();
@@ -2680,11 +2709,17 @@ function renderGuided() {
 }
 function bindGuided() { el('btnGuidedNext')?.addEventListener('click',()=>{ S.phase='reflect'; go(); }); }
 function renderDebrief() {
-  const hasPre = S.studyConfig.preQ && S.studyConfig.preQ.length > 0;
-  const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
-  const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
-  
-  if (!hasPre && !hasPost && !hasPuzzles) {
+  const hasPre = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
+  const hasPost = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
+  const hasPuzzles = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
+  const hasReflections = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
+  const hasPostSurvey = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
+
+  // Only truly survey‑only studies (no tests, puzzles, reflections, post‑survey)
+  const isTrulySurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey;
+
+  if (isTrulySurveyOnly) {
+    // Original Impostor‑specific debrief (Study 2)
     return `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
       <div style="text-align:center; padding:20px 0;">
         <div style="font-size:4rem;">✅</div>
@@ -2704,9 +2739,18 @@ function renderDebrief() {
       </div>
     </div>`;
   }
-  
+
+  // For all other studies (including those with reflections/post‑survey)
   const gain = (S.metrics?.postScore && S.metrics?.preScore) ? S.metrics.postScore - S.metrics.preScore : null;
-  return `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><div class="cert-box"><div class="pcode-num">${S.participantCode}</div>${gain!==null?`<p>Learning gain: ${gain>=0?'+':''}${gain}%</p>`:''}</div><div class="actions"><button class="btn btn-primary" id="btnDebriefNext">View results →</button></div></div>`;
+  return `${topbarHTML()}${phaseStripHTML()}<div class="main-card">
+    <div class="cert-box">
+      <div class="pcode-num">${S.participantCode}</div>
+      ${gain !== null ? `<p>Learning gain: ${gain >= 0 ? '+' : ''}${gain}%</p>` : ''}
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" id="btnDebriefNext">View results →</button>
+    </div>
+  </div>`;
 }
 async function renderComplete() {
   // ── Safety guard for post‑survey (Study 3) ──
@@ -3499,6 +3543,11 @@ async function go() {
     }
   }
 
+  // ---- Fetch studies when on hero page ----
+  if (S.phase === 'hero' && S.availableStudies.length === 0) {
+    S.availableStudies = await apiFetchStudies();
+  }
+
   // ---- Refresh enrolments and studies when entering study selection ----
   if (S.phase === 'studySelect') {
     if (S.availableStudies.length === 0) {
@@ -3657,11 +3706,7 @@ async function go() {
         go();
         return;
 
-      // You can add more buttons here if needed, e.g.:
-      // case 'btnLogoutPortal': ... but logout is already bound below
-
       default:
-        // Optional: handle via data-action attribute
         const action = target.dataset.action;
         if (action === 'back-to-studies') {
           e.preventDefault();
@@ -3676,7 +3721,7 @@ async function go() {
   app.addEventListener('click', delegatedHandler);
   app._delegatedListener = delegatedHandler;
 
-  // ---- Re‑attach top‑bar events (these are bound directly) ----
+  // ---- Re‑attach top‑bar events ----
   el('btnTheme')?.addEventListener('click', () => { toggleTheme(); });
   el('btnAudio')?.addEventListener('click', () => { S.audioOn = !S.audioOn; go(); });
   el('btnOtherStudies')?.addEventListener('click', async () => {
@@ -3734,7 +3779,6 @@ async function go() {
   }
 
   // ---- Bind phase‑specific events ----
-  // (These now only handle events not covered by delegation, or they remain for clarity)
   switch (S.phase) {
     case 'hero': bindHero(); break;
     case 'register': bindRegister(); break;
@@ -3753,8 +3797,6 @@ async function go() {
     case 'code': bindCodeDynamic(); break;
     case 'review': bindReviewDynamic(); break;
     case 'post': bindAssessmentDynamic('post');
-      // The delegated handler already covers btnBackToStudies, so this is optional.
-      // Keep for backwards compatibility.
       el('btnBackToStudies')?.addEventListener('click', () => {
         S.phase = 'studySelect';
         go();
