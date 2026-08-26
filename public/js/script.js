@@ -711,7 +711,7 @@ function renderHero() {
               <span>${langLabel}</span>
               <span>Solo</span>
             </div>
-            <button class="card-cta" data-study-id="${study.id}">Learn more &amp; enrol →</button>
+            <button class="card-cta" data-study-id="${study.id}"> Enrol to learn more  →</button>
           </div>
         `;
       }).join('')
@@ -727,7 +727,7 @@ function renderHero() {
         <div class="hero-ctas">
           <button class="btn btn-primary" id="btnStartParticipation">▶ Start Participation</button>
           <button class="btn btn-ghost" id="btnResumeExisting">↻ Resume Existing Study</button>
-          <button class="btn btn-ghost" id="btnMyCertificates">📜 My Certificates</button>
+          <button class="btn btn-ghost" id="btnMyCertificates">📜 Get Certificates for Completed Studies</button>
         </div>
         <div class="hero-meta">
           <span><span class="dot-gold"></span> NDPR‑compliant data handling</span>
@@ -3567,15 +3567,35 @@ async function go() {
     S.isAdminMode = true;
     S.phase = 'adminLogin';
   }
+
+  // ---- Improved resume from URL parameter ----
   const resumeCode = urlParams.get('resume');
   if (resumeCode && S.phase === 'hero') {
-    setTimeout(() => {
+    console.log('📌 Resume code detected:', resumeCode);
+    
+    // Function to attempt resume
+    const attemptResume = () => {
       const inp = document.getElementById('resumeCode');
-      if (inp) {
-        inp.value = resumeCode;
-        document.getElementById('btnDoResume')?.click();
+      const btn = document.getElementById('btnDoResume');
+      const panel = document.getElementById('resumePanel');
+      
+      if (!inp || !btn) {
+        console.warn('Resume elements not found, retrying...');
+        setTimeout(attemptResume, 200);
+        return;
       }
-    }, 100);
+      
+      // Show the resume panel
+      if (panel) panel.style.display = 'block';
+      
+      // Fill the code
+      inp.value = resumeCode;
+      console.log('✅ Filled resume code, clicking button...');
+      btn.click();
+    };
+    
+    // Wait for the page to render and handlers to attach
+    setTimeout(attemptResume, 300);
   }
 
   // ---- Reload study config if needed ----
@@ -3643,7 +3663,7 @@ async function go() {
         patchedEnrolments.push(enrol);
       }
       S.myEnrolments = patchedEnrolments;
-      await syncCompletionStatus();   // optional, keep if present
+      await syncCompletionStatus();
     }
   }
 
