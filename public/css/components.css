@@ -1008,6 +1008,7 @@ footer a {
   color: var(--gold, #C68E17);
 }
 
+/* Brand (topbar) */
 .brand {
   display: flex;
   align-items: center;
@@ -1024,4 +1025,37 @@ footer a {
   font-weight: 400;
   opacity: 0.75;
   margin-top: 2px;
+}
+
+/* ============================================================
+   RECOVERY SECTION (Forgot participant code?)
+   ============================================================ */
+#recover-code {
+  padding: 40px 0;
+}
+.recover-box {
+  background: var(--paper-raised, #F5F8F5);
+  border: 1px solid var(--line, rgba(20, 38, 31, 0.14));
+  border-radius: 16px;
+  padding: 24px;
+  max-width: 500px;
+  margin: 0 auto;
+}
+.dark .recover-box {
+  background: var(--gray-100);
+  border-color: var(--border);
+}
+#homeRecoverMatric {
+  background: var(--card-bg);
+  color: var(--text-color);
+  border: 1.5px solid var(--line);
+}
+.dark #homeRecoverMatric {
+  background: var(--gray-200);
+  color: var(--text-color);
+  border-color: var(--border);
+}
+#homeRecoverMatric:focus {
+  border-color: var(--primary);
+  outline: none;
 }

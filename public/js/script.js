@@ -741,6 +741,9 @@ function renderHero() {
             <input type="text" id="resumeCode" placeholder="Participant code" style="flex:1; padding:10px; border-radius:40px; border:1.5px solid var(--line);">
             <button class="btn btn-primary" id="btnDoResume">Resume →</button>
           </div>
+          <p style="margin-top:8px; font-size:0.85rem;">
+            <a href="#recover-code" style="color:var(--primary); text-decoration:underline;">Forgot your code? Click here to recover it.</a>
+          </p>
           <p id="resumeErr" style="color:var(--danger); text-align:center; margin-top:6px;"></p>
         </div>
       </div>
@@ -774,6 +777,23 @@ function renderHero() {
       </div>
       <div class="studies">
         ${studyCards}
+      </div>
+    </div>
+  </section>
+
+  <section id="recover-code">
+    <div class="wrap">
+      <div class="section-head" style="text-align:center;">
+        <div class="section-eyebrow">Need your participant code?</div>
+        <h2>Forgot your participant code?</h2>
+        <p class="section-sub">Enter your matric number below and we'll send your participant code to your registered email address.</p>
+      </div>
+      <div class="recover-box" style="max-width:500px; margin:0 auto; background:var(--paper-raised); padding:24px; border-radius:16px; border:1px solid var(--line);">
+        <div style="display:flex; gap:12px; flex-wrap:wrap;">
+          <input type="text" id="homeRecoverMatric" placeholder="Matric number (e.g. NDCS/024/2002)" style="flex:1; padding:10px; border-radius:40px; border:1.5px solid var(--line); background:var(--card-bg); color:var(--text-color);">
+          <button class="btn btn-primary" id="btnHomeSendCode">📧 Send my code</button>
+        </div>
+        <div id="homeRecoveryStatus" style="margin-top:12px; font-size:0.9rem;"></div>
       </div>
     </div>
   </section>
@@ -827,6 +847,10 @@ function bindHero() {
   const doResumeBtn = document.getElementById('btnDoResume');
   const myCertsBtn = document.getElementById('btnMyCertificates');
   const adminLink = document.getElementById('btnAdminLink');
+
+  // ── Code recovery elements ──
+  const sendCodeBtn = document.getElementById('btnHomeSendCode');
+  const recoveryStatus = document.getElementById('homeRecoveryStatus');
 
   // ── Initially hide resume panel ──
   if (resumePanel) resumePanel.style.display = 'none';
@@ -980,6 +1004,33 @@ function bindHero() {
     e.preventDefault();
     window.location.href = window.location.pathname + '?admin=true';
   });
+
+  // ── Forgot participant code? (home page recovery) ──
+  if (sendCodeBtn) {
+    sendCodeBtn.addEventListener('click', async () => {
+      const matric = document.getElementById('homeRecoverMatric')?.value.trim();
+      if (!matric) {
+        recoveryStatus.textContent = 'Please enter your matric number.';
+        recoveryStatus.style.color = 'var(--danger)';
+        return;
+      }
+      recoveryStatus.textContent = 'Sending...';
+      recoveryStatus.style.color = 'var(--text)';
+      try {
+        const result = await apiSendCode(matric);
+        if (result.success) {
+          recoveryStatus.textContent = '✅ Code sent to your registered email address.';
+          recoveryStatus.style.color = 'var(--success)';
+        } else {
+          recoveryStatus.textContent = '❌ Failed to send. Please check your matric and try again.';
+          recoveryStatus.style.color = 'var(--danger)';
+        }
+      } catch (e) {
+        recoveryStatus.textContent = '❌ ' + (e.message || 'Error sending code.');
+        recoveryStatus.style.color = 'var(--danger)';
+      }
+    });
+  }
 }
 
 function renderResume() {
