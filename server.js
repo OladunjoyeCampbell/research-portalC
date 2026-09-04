@@ -9,6 +9,24 @@ require('dotenv').config();
 
 const dns = require('dns');
 if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv4first');
+
+// ============================================================
+// LLM Configuration (for Logic Tutor)
+// ============================================================
+const { Groq } = require('groq-sdk');
+const { OpenAI } = require('openai');
+
+const LLM_PROVIDER = process.env.LLM_PROVIDER || 'groq';
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+const MODELS = {
+  groq: process.env.LLM_MODEL_GROQ || 'groq/compound',
+  deepseek: process.env.LLM_MODEL_DEEPSEEK || 'deepseek-chat',
+  openai: process.env.LLM_MODEL_OPENAI || 'gpt-4o-mini'
+};
+
 // ============================================================
 // ElevenLabs Configuration
 // ============================================================
@@ -42,6 +60,7 @@ const path = require('path');
 
 const app = express();
 app.set('trust proxy', 1);
+
 // ============================================================
 // ADDED: ElevenLabs audio cache folder
 // ============================================================
@@ -62,7 +81,7 @@ if (!fs.existsSync(AUDIO_CACHE_DIR)) {
 // CORS (allow localhost and Render origin)
 const allowedOrigins = [
   'http://localhost:3000',
-  'https://research-portalc.onrender.com' // replace with your actual Render URL
+  'https://research-portalc.onrender.com'
 ];
 app.use(cors({
   origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)),
@@ -141,7 +160,138 @@ async function sendEmail(to, subject, html) {
 }
 // =========================================
 
-// Helper functions
+// ============================================================
+// TUTOR FUNCTIONS – LLM Logic for TunaniGini
+// ============================================================
+
+// ── LLM response generator ──
+async function getLLMResponse(messages) {
+  try {
+    if (LLM_PROVIDER === 'groq') {
+      const client = new Groq({ apiKey: GROQ_API_KEY });
+      const response = await client.chat.completions.create({
+        model: MODELS.groq,
+        messages,
+        temperature: 0.7,
+        max_tokens: 500
+      });
+      return response.choices[0].message.content;
+    } else if (LLM_PROVIDER === 'deepseek') {
+      const client = new OpenAI({ apiKey: DEEPSEEK_API_KEY, baseURL: 'https://api.deepseek.com' });
+      const response = await client.chat.completions.create({
+        model: MODELS.deepseek,
+        messages,
+        temperature: 0.7,
+        max_tokens: 500
+      });
+      return response.choices[0].message.content;
+    } else { // openai
+      const client = new OpenAI({ apiKey: OPENAI_API_KEY });
+      const response = await client.chat.completions.create({
+        model: MODELS.openai,
+        messages,
+        temperature: 0.7,
+        max_tokens: 500
+      });
+      return response.choices[0].message.content;
+    }
+  } catch (err) {
+    console.error('LLM error:', err);
+    throw new Error(`LLM request failed: ${err.message}`);
+  }
+}
+
+// ── Topic detection ──
+function inferTopic(userMsg) {
+  const userLower = userMsg.toLowerCase();
+  const topics = {
+    condition: ['if', 'else', 'condition', 'sharadi', 'idan'],
+    loop: ['loop', 'for', 'while', 'madauki', 'maimaita'],
+    sequence: ['sequence', 'order', 'jeri', 'mataki'],
+    variable: ['variable', 'int', 'string', 'canji'],
+    function: ['function', 'def', 'aiki'],
+    array: ['array', 'list', 'jeri bayanai']
+  };
+  let detected = 'general';
+  for (const [topic, keywords] of Object.entries(topics)) {
+    if (keywords.some(kw => userLower.includes(kw))) {
+      detected = topic;
+      break;
+    }
+  }
+  return detected;
+}
+
+// ── Struggle detection ──
+function detectStruggle(assistantReply) {
+  const strugglePhrases = ['try again', 'mistake', 'error', "let's review", 'kuskure', 'sake dubawa', 'ba daidai ba'];
+  const lower = assistantReply.toLowerCase();
+  return strugglePhrases.some(phrase => lower.includes(phrase));
+}
+
+// ── System prompts ──
+function getSystemPrompt(lang) {
+  if (lang === 'en') {
+    return `You are a patient bilingual (English-Hausa) logic tutor for novice Nigerian higher education computing students.
+
+FORMATTING RULES (MANDATORY - FOLLOW STRICTLY):
+- When listing algorithm steps, ALWAYS put EACH step on a NEW LINE using the \n character.
+- ALWAYS wrap step numbers in **bold** using double asterisks. Example: **Step 1:** not Step 1:
+- ALWAYS wrap variable names in **bold**. Example: store in **L** not store in L.
+- NEVER write steps as a single paragraph or separated only by commas.
+- Use this exact format for steps:
+  **Step 1:** Do this and store in **variable**
+  **Step 2:** Do that
+  **Step 3:** Do something else
+- Separate each step with a line break (\n).
+- Use a blank line between your introduction and the first step.
+
+TUTOR RULES:
+1. NEVER give full code. Break problems into small steps.
+2. Track the student's current step and past mistakes.
+3. If student asks for full code twice: "Let's review the logic you already have. What is the first condition?"
+4. Use local examples: JAMB score, CGPA, BVN age verification, grade checking.
+5. If student mixes Hausa/English, gently correct.
+6. If student is stuck (same error 3 times), offer a simpler parallel example.
+7. If student replies only in Hausa for 2 turns, switch to full Hausa but keep programming keywords in English with Hausa translation (e.g., 'loop (madauki)').
+8. Keep the overall response under 5 sentences total (excluding the step list).
+9. Always end with an encouraging question or next small step.
+10. If the student sends a long message, encourage them to break it down into smaller steps and send one at a time.
+`;
+  } else {
+    return `Kai mai haƙuri ne mai koyar da dabaru da harsuna biyu (Turanci-Hausa) ga ɗaliban kwamfuta na manyan makarantu a Najeriya.
+
+DOKOKIN TSARA (MANDATORY - KA BISU SOSAI):
+- Idan kana jera matakai, ka sanya KOWANE mataki a SABON LAYI ta amfani da \n.
+- Koyaushe ka sanya lambobin matakai a **bold** ta amfani da tauraro biyu. Misali: **Mataki 1:** ba Mataki 1: ba.
+- Koyaushe ka sanya sunayen masu canji (variables) a **bold**. Misali: ajiye a **L** ba ajiye a L ba.
+- KADA ka rubuta matakai a layi ɗaya ko kuma da waƙafi (comma) tsakaninsu.
+- Ka yi amfani da wannan tsari:
+  **Mataki 1:** Yi wannan ka ajiye a **mai_canji**
+  **Mataki 2:** Yi wancan
+  **Mataki 3:** Yi wani abu
+- Ka raba kowane mataki da sabon layi (\n).
+- Ka bar layi ɗaya tsakanin gabatarwa da mataki na farko.
+
+DOKOKIN KOYARWA:
+1. KADA KA ba da cikakken code. Raba matsalar zuwa ƙananan matakai.
+2. Ka bi matakin da ɗalibi yake ciki da kurakuran da ya riga ya yi.
+3. Idan ɗalibi ya nemi cikakken code sau biyu: "Bari mu sake duba dabaru da ka riga ka samu. Menene sharudi na farko?"
+4. Ka yi amfani da misalai na gida: JAMB, CGPA, BVN, duba maki.
+5. Idan ɗalibi ya haɗa Hausa da Turanci ba daidai ba, ka gyara a hankali.
+6. Idan ɗalibi ya makale (kuskure iri ɗaya sau 3), ka ba shi misali mafi sauƙi.
+7. Idan ɗalibi ya amsa da Hausa kawai sau 2, ka canza zuwa Hausa gaba ɗaya amma ka bar kalmomin shirye-shirye cikin Turanci tare da fassarar Hausa (misali 'loop (madauki)').
+8. Ka rage jimlar amsa (ba tare da jerin matakai ba) zuwa jumla 5 ko ƙasa.
+9. Koyaushe ka ƙare da tambaya mai ƙarfafawa ko mataki na gaba kaɗan.
+10. Idan ɗalibi ya aika saƙo mai tsawo, ka ƙarfafa su su raba shi zuwa ƙananan matakai su aika ɗaya bayan ɗaya.
+`;
+  }
+}
+
+// ============================================================
+// Helper functions (existing)
+// ============================================================
+
 function generateParticipantCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   return 'AL-' + Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
@@ -177,11 +327,10 @@ async function generateUniqueParticipantCode() {
   let code;
   let exists = true;
   let attempts = 0;
-  const maxAttempts = 20; // more than enough
+  const maxAttempts = 20;
 
   while (exists && attempts < maxAttempts) {
     code = generateParticipantCode();
-    // Check if this code already exists
     const { data, error } = await sb
       .from('participants')
       .select('participant_code')
@@ -190,19 +339,17 @@ async function generateUniqueParticipantCode() {
 
     if (error) {
       console.error('Error checking participant code uniqueness:', error);
-      // Fallback: generate a code with timestamp suffix (very safe)
       const fallbackCode = `AL-${Date.now().toString(36).toUpperCase()}`;
       return fallbackCode;
     }
 
     if (!data) {
-      exists = false; // code is unique, we can use it
+      exists = false;
     }
     attempts++;
   }
 
   if (attempts >= maxAttempts) {
-    // Absolute fallback – practically never happens
     return `AL-${Date.now().toString(36).toUpperCase()}`;
   }
 
@@ -237,11 +384,39 @@ function isAdminLoggedIn(req) {
   return req.session && req.session.admin === true;
 }
 
-
-// Health check
+// ============================================================
+// HEALTH CHECK
+// ============================================================
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date() }));
 
-// ADMIN AUTHENTICATION
+// ============================================================
+// TUTOR CHAT ENDPOINT
+// ============================================================
+app.post('/api/tutor/chat', async (req, res) => {
+  const { message, lang = 'ha', rating, history = [] } = req.body;
+  if (!message) return res.status(400).json({ error: 'Message required' });
+
+  const systemPrompt = getSystemPrompt(lang);
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...history.slice(-10),
+    { role: 'user', content: message }
+  ];
+
+  try {
+    const reply = await getLLMResponse(messages);
+    const topic = inferTopic(message);
+    const struggle = detectStruggle(reply);
+    res.json({ reply, topic, struggle });
+  } catch (err) {
+    console.error('Tutor chat error:', err);
+    res.status(500).json({ error: 'Failed to generate response' });
+  }
+});
+
+// ============================================================
+// ADMIN AUTHENTICATION (existing)
+// ============================================================
 app.post('/api/admin/login', (req, res) => {
   const { password } = req.body;
   if (password === ADMIN_PASSWORD) {
@@ -262,6 +437,7 @@ function requireAdmin(req, res, next) {
   if (!isAdminLoggedIn(req)) return res.status(401).json({ error: 'Unauthorised – please log in' });
   next();
 }
+
 
 // Participant check and code recovery endpoints
 app.get('/api/participant/check', async (req, res) => {
@@ -879,7 +1055,6 @@ app.post('/api/speak', async (req, res) => {
 });
 
 
-// CATCH-ALL: serve index.html for client-side routing
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'API not found' });
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

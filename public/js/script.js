@@ -1106,8 +1106,9 @@ function bindResume() {
   const hasPuzzles = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
   const hasReflections = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
   const hasPostSurvey = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
+  const hasTutor = S.studyConfig?.hasTutor === true;
 
-  const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey;
+  const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey && !hasTutor;
 
   // ── Survey‑only studies ──
   if (isSurveyOnly) {
@@ -1136,6 +1137,17 @@ function bindResume() {
     console.log('  completedPhases.survey:', S.completedPhases.survey);
     console.log('  hasReflections:', hasReflections);
     console.log('  hasPostSurvey:', hasPostSurvey);
+    console.log('  hasTutor:', hasTutor);
+
+    // Re‑evaluate inside the click handler
+    const hasPre2 = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
+    const hasPost2 = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
+    const hasPuzzles2 = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
+    const hasReflections2 = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
+    const hasPostSurvey2 = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
+    const hasTutor2 = S.studyConfig?.hasTutor === true;
+
+    const isSurveyOnly2 = !hasPre2 && !hasPost2 && !hasPuzzles2 && !hasReflections2 && !hasPostSurvey2 && !hasTutor2;
 
     // ── 1. If consent is not given, go to consent ──
     if (!S.consentGeneral) {
@@ -1155,25 +1167,32 @@ function bindResume() {
 
     // ── 3. Survey is done – decide next phase ──
     console.log('  → Survey done – deciding next phase');
-    if (hasPre) {
+    if (hasPre2) {
       S.phase = 'pre';
       S.assMode = 'pre';
       S.assQ = S.assAnswers.length || 0;
-    } else if (hasPost) {
+    } else if (hasPost2) {
       S.phase = 'post';
       S.assMode = 'post';
       S.assQ = 0;
       S.assAnswers = [];
-    } else if (hasReflections) {
+    } else if (hasReflections2) {
       const done = S.metrics?.reflections ? S.metrics.reflections.length : 0;
       S.reflectionWeek = done;
       S.phase = 'reflection';
-    } else if (hasPostSurvey) {
+    } else if (hasPostSurvey2) {
       S.phase = 'postsurvey';
+    } else if (hasTutor2) {
+      // ── Tutor study ──
+      if (!S.metrics.tutorWeek) S.metrics.tutorWeek = 0;
+      if (!S.metrics.tutorHistory) S.metrics.tutorHistory = [];
+      if (!S.metrics.tutorSessions) S.metrics.tutorSessions = [];
+      if (!S.metrics.tutorStartDate) S.metrics.tutorStartDate = Date.now();
+      S.phase = 'tutor';
     } else if (S.completedPhases.posttest) {
       S.phase = 'complete';
     } else {
-      // For puzzle studies without pre/post tests (unlikely) – fallback
+      // For puzzle studies without pre/post tests – fallback
       S.phase = 'orient';
     }
     go();
@@ -1184,13 +1203,17 @@ function bindResume() {
     if (confirm('Erase all progress?')) {
       localStorage.removeItem(getStorageKey());
       S.metrics = { startedAt: Date.now(), puzzles: {} };
-      S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false, postSurvey: false };
+      S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false, postSurvey: false, tutor: false };
       S.puzzlesCompletedCount = 0;
       S.surveyAnswers = {};
       S.assAnswers = [];
       S.postTestPending = false;
       S.postSurveyAnswers = {};
       S.reflectionWeek = 0;
+      S.metrics.tutorWeek = 0;
+      S.metrics.tutorHistory = [];
+      S.metrics.tutorSessions = [];
+      S.metrics.tutorStartDate = null;
       S.phase = 'orient';
       saveLocalProgress();
       go();
@@ -2414,6 +2437,250 @@ function bindPostSurveyDynamic() {
     go();
   });
 }
+function renderTutorDynamic() {
+  // ── Set tutor start date if not already set ──
+  if (!S.metrics.tutorStartDate) {
+    S.metrics.tutorStartDate = Date.now();
+    saveLocalProgress();
+  }
+
+  const tasks = S.studyConfig.tutorTasks || [];
+  const totalWeeks = tasks.length;
+  const currentWeek = S.metrics.tutorWeek || 0;
+
+  if (totalWeeks === 0 || currentWeek >= totalWeeks) {
+    S.phase = 'post';
+    S.assMode = 'post';
+    S.assQ = 0;
+    S.assAnswers = [];
+    go();
+    return '';
+  }
+
+  const task = tasks[currentWeek];
+  const lang = S.studyLang || 'en';
+  const title = lang === 'en' ? task.title_en : task.title_ha;
+  const description = lang === 'en' ? task.description_en : task.description_ha;
+  const example = lang === 'en' ? task.example_prompt_en : task.example_prompt_ha;
+
+  const history = S.metrics.tutorHistory || [];
+  if (history.length === 0) {
+    const greeting = lang === 'en'
+      ? `👋 Welcome to Week ${currentWeek + 1} of the Logic Tutor!\n\n**Task: ${title}**\n\n${description}\n\n💡 If you get stuck, try: "${example}"\n\nStart by writing your solution below.`
+      : `👋 Sannu da zuwa Mako ${currentWeek + 1} na TunaniGini!\n\n**Aiki: ${title}**\n\n${description}\n\n💡 Idan ka makale, gwada: "${example}"\n\nFara da rubuta mafitarka a kasa.`;
+    S.metrics.tutorHistory = [{ role: 'assistant', content: greeting, timestamp: new Date().toISOString() }];
+    saveLocalProgress();
+  }
+
+  const messagesHtml = (S.metrics.tutorHistory || []).map(msg => {
+    const senderClass = msg.role === 'user' ? 'user-message' : 'assistant-message';
+    const formatted = msg.content.replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    return `<div class="message ${senderClass}">${formatted}</div>`;
+  }).join('');
+
+  const userMessages = (S.metrics.tutorHistory || []).filter(m => m.role === 'user').length;
+  const canComplete = userMessages >= 3;
+
+  const topbar = topbarHTML();
+  const phaseStrip = phaseStripHTML();
+
+  return `${topbar}${phaseStrip}<div class="main-card">
+    <h2>🧠 TunaniGini Logic Tutor</h2>
+    <p style="margin-bottom:16px; color:var(--text-muted);">
+      Week ${currentWeek + 1} of ${totalWeeks}
+    </p>
+    <div style="display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap;">
+      <button class="pill ${lang === 'en' ? 'pill-blue' : ''}" id="tutorLangEn">English</button>
+      <button class="pill ${lang === 'ha' ? 'pill-blue' : ''}" id="tutorLangHa">Hausa</button>
+      <button class="pill pill-success" id="tutorEndSession" style="margin-left:auto;" ${canComplete ? '' : 'disabled'}>
+        ${canComplete ? '✅ Mark as Complete' : 'Send 3+ messages to complete'}
+      </button>
+      <button class="pill pill-gray" id="tutorExitBtn">📚 Save & Exit</button>
+    </div>
+    <div class="chat-box" id="tutorChatBox" style="background:var(--gray-50); border-radius:16px; padding:16px; height:400px; overflow-y:auto; display:flex; flex-direction:column; gap:12px;">
+      ${messagesHtml}
+    </div>
+    <div class="input-area" style="display:flex; gap:12px; margin-top:16px;">
+      <input type="text" id="tutorInput" placeholder="${lang === 'en' ? 'Type your solution...' : 'Rubuta mafitarka...'}" style="flex:1; padding:10px 16px; border-radius:40px; border:1.5px solid var(--border); background:var(--input-bg); color:var(--text-color);">
+      <button class="btn btn-primary" id="tutorSendBtn">Send ➤</button>
+    </div>
+    <div id="tutorStatus" style="margin-top:8px; font-size:0.85rem; color:var(--text-muted);"></div>
+  </div>`;
+}
+function bindTutorDynamic() {
+  const chatBox = document.getElementById('tutorChatBox');
+  const input = document.getElementById('tutorInput');
+  const sendBtn = document.getElementById('tutorSendBtn');
+  const langEn = document.getElementById('tutorLangEn');
+  const langHa = document.getElementById('tutorLangHa');
+  const endBtn = document.getElementById('tutorEndSession');
+  const exitBtn = document.getElementById('tutorExitBtn');
+  const status = document.getElementById('tutorStatus');
+
+  if (!chatBox) return;
+
+  let currentLang = S.studyLang || 'ha';
+
+  // ── Helper: scroll chat to bottom ──
+  function scrollChat() {
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+
+  // ── Helper: add a message to the UI and save to state ──
+  function addMessage(role, content, save = true) {
+    const div = document.createElement('div');
+    div.className = `message ${role === 'user' ? 'user-message' : 'assistant-message'}`;
+    const formatted = content.replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    div.innerHTML = formatted;
+    chatBox.appendChild(div);
+    scrollChat();
+    if (save) {
+      if (!S.metrics.tutorHistory) S.metrics.tutorHistory = [];
+      S.metrics.tutorHistory.push({ role, content, timestamp: new Date().toISOString() });
+      saveLocalProgress();
+      updateEndButton();
+    }
+  }
+
+  // ── Helper: update "Mark as Complete" button state ──
+  function updateEndButton() {
+    const userMessages = (S.metrics.tutorHistory || []).filter(m => m.role === 'user').length;
+    if (endBtn) {
+      endBtn.disabled = userMessages < 3;
+      endBtn.textContent = userMessages >= 3 ? '✅ Mark as Complete' : `Send ${3 - userMessages} more message(s) to complete`;
+    }
+  }
+
+  // ── If no history (should not happen), add greeting ──
+  if (!S.metrics.tutorHistory || S.metrics.tutorHistory.length === 0) {
+    const tasks = S.studyConfig.tutorTasks || [];
+    const currentWeek = S.metrics.tutorWeek || 0;
+    const task = tasks[currentWeek] || {};
+    const lang = S.studyLang || 'en';
+    const title = lang === 'en' ? task.title_en : task.title_ha;
+    const description = lang === 'en' ? task.description_en : task.description_ha;
+    const example = lang === 'en' ? task.example_prompt_en : task.example_prompt_ha;
+    const greeting = lang === 'en'
+      ? `👋 Welcome to Week ${currentWeek + 1} of the Logic Tutor!\n\n**Task: ${title}**\n\n${description}\n\n💡 If you get stuck, try: "${example}"\n\nStart by writing your solution below.`
+      : `👋 Sannu da zuwa Mako ${currentWeek + 1} na TunaniGini!\n\n**Aiki: ${title}**\n\n${description}\n\n💡 Idan ka makale, gwada: "${example}"\n\nFara da rubuta mafitarka a kasa.`;
+    addMessage('assistant', greeting, true);
+  }
+
+  updateEndButton();
+  scrollChat();
+
+  // ── Send message ──
+  async function sendMessage() {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    addMessage('user', text, true);
+    status.textContent = currentLang === 'en' ? 'TunaniGini is thinking...' : 'TunaniGini yana tunani...';
+
+    try {
+      const history = (S.metrics.tutorHistory || []).slice(-10).map(msg => ({ role: msg.role, content: msg.content }));
+      const response = await fetch(`${API_BASE}/api/tutor/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: text,
+          lang: currentLang,
+          history
+        })
+      });
+      const data = await response.json();
+      if (data.reply) {
+        addMessage('assistant', data.reply, true);
+        if (data.topic) console.log('Topic:', data.topic);
+        if (data.struggle) console.log('Struggle detected');
+      } else {
+        addMessage('assistant', 'Error: ' + (data.error || 'Unknown error'), true);
+      }
+    } catch (err) {
+      addMessage('assistant', 'Network error. Please try again.', true);
+    } finally {
+      status.textContent = '';
+    }
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+  input.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') sendMessage();
+  });
+
+  // ── Language toggle ──
+  langEn.addEventListener('click', () => {
+    currentLang = 'en';
+    S.studyLang = 'en';
+    langEn.classList.add('pill-blue');
+    langHa.classList.remove('pill-blue');
+    input.placeholder = 'Type your solution...';
+    saveLocalProgress();
+  });
+  langHa.addEventListener('click', () => {
+    currentLang = 'ha';
+    S.studyLang = 'ha';
+    langHa.classList.add('pill-blue');
+    langEn.classList.remove('pill-blue');
+    input.placeholder = 'Rubuta mafitarka...';
+    saveLocalProgress();
+  });
+
+  // ── End session (Mark as Complete) ──
+  endBtn.addEventListener('click', () => {
+    const userMessages = (S.metrics.tutorHistory || []).filter(m => m.role === 'user').length;
+    if (userMessages < 3) {
+      alert(currentLang === 'en' ? 'Please send at least 3 messages before completing this week.' : 'Da fatan za a aika aƙalla saƙo 3 kafin kammala wannan mako.');
+      return;
+    }
+    if (confirm(currentLang === 'en' ? 'Mark this week as complete?' : 'Ka kammala wannan mako?')) {
+      // Record session end
+      const session = {
+        week: (S.metrics.tutorWeek || 0) + 1,
+        start: S.metrics.currentSessionStart || new Date().toISOString(),
+        end: new Date().toISOString(),
+        messageCount: (S.metrics.tutorHistory || []).filter(m => m.role === 'user').length,
+        taskCompleted: true
+      };
+      if (!S.metrics.tutorSessions) S.metrics.tutorSessions = [];
+      S.metrics.tutorSessions.push(session);
+      S.metrics.currentSessionStart = null;
+
+      // Advance to next week
+      const totalWeeks = S.studyConfig.tutorTasks?.length || 0;
+      S.metrics.tutorWeek = (S.metrics.tutorWeek || 0) + 1;
+
+      if (S.metrics.tutorWeek >= totalWeeks) {
+        // All weeks done → mark tutor complete and move to post‑test
+        S.completedPhases.tutor = true;
+        saveLocalProgress();
+        const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
+        if (hasPost) {
+          S.phase = 'post';
+          S.assMode = 'post';
+          S.assQ = 0;
+          S.assAnswers = [];
+        } else {
+          S.phase = 'debrief';
+        }
+        go();
+      } else {
+        // Next week – clear history for fresh start
+        S.metrics.tutorHistory = [];
+        saveLocalProgress();
+        S.phase = 'tutor';
+        go();
+      }
+    }
+  });
+
+  // ── Save & Exit ──
+  exitBtn?.addEventListener('click', () => {
+    saveLocalProgress();
+    S.phase = 'studySelect';
+    go();
+  });
+}
 
 function renderAssessmentDynamic(mode) {
   // ── Safety guard: if config is missing, redirect ──
@@ -2481,7 +2748,6 @@ function bindAssessmentDynamic(mode) {
     console.warn('bindAssessmentDynamic: studyConfig missing – aborting');
     return;
   }
-  // If post mode but no postQ, redirect
   if (mode === 'post' && (!S.studyConfig.postQ || S.studyConfig.postQ.length === 0)) {
     console.warn('bindAssessmentDynamic: post mode called with no postQ – redirecting');
     S.phase = 'studySelect';
@@ -2513,16 +2779,28 @@ function bindAssessmentDynamic(mode) {
       const scorable = qs.filter(q => !q.isAttention);
       const total = Math.round((scorable.filter((q, i) => S.assAnswers[qs.indexOf(q)] === q.correct).length / scorable.length) * 100);
       if (!S.metrics) S.metrics = { puzzles: {} };
+
       if (mode === 'pre') {
         S.completedPhases.pretest = true;
         S.metrics.preScore = total;
         S.metrics.preCompletedAt = new Date().toISOString();
         saveLocalProgress();
-        S.phase = 'study';
-        S.puzzleIdx = 0;
+
+        if (S.studyConfig.hasTutor) {
+          if (!S.metrics.tutorWeek) S.metrics.tutorWeek = 0;
+          if (!S.metrics.tutorHistory) S.metrics.tutorHistory = [];
+          if (!S.metrics.tutorSessions) S.metrics.tutorSessions = [];
+          if (!S.metrics.tutorStartDate) S.metrics.tutorStartDate = Date.now();
+          S.phase = 'tutor';
+        } else {
+          S.phase = 'study';
+          S.puzzleIdx = 0;
+        }
+
         saveLocalProgress();
         go();
       } else {
+        // post‑test completion
         S.completedPhases.posttest = true;
         S.metrics.postScore = total;
         S.metrics.postTestTaken = true;
@@ -3680,10 +3958,18 @@ async function go() {
 
   // ---- Advance from pre-test if already completed ----
   if (S.phase === 'pre' && S.completedPhases.pretest) {
+  if (S.studyConfig?.hasTutor) {
+    // Initialise tutor metrics if needed
+    if (!S.metrics.tutorWeek) S.metrics.tutorWeek = 0;
+    if (!S.metrics.tutorHistory) S.metrics.tutorHistory = [];
+    if (!S.metrics.tutorSessions) S.metrics.tutorSessions = [];
+    if (!S.metrics.tutorStartDate) S.metrics.tutorStartDate = Date.now();
+    S.phase = 'tutor';
+  } else {
     S.phase = 'study';
     S.puzzleIdx = S.puzzlesCompletedCount;
   }
-
+}
   // ---- AUTO-ADVANCE FOR REFLECTIONS ----
   if (S.phase === 'reflection') {
     const total = (S.studyConfig?.reflections || []).length;
@@ -3697,6 +3983,59 @@ async function go() {
     }
   }
 
+// ---- TUTOR TIME-LOCKING ----
+if (S.phase === 'tutor') {
+  const tasks = S.studyConfig.tutorTasks || [];
+  const totalWeeks = tasks.length;
+  const idx = S.metrics.tutorWeek || 0;
+  if (idx >= totalWeeks) {
+    // All done – move to post-test if tutor not already completed
+    if (!S.completedPhases.tutor) {
+      S.completedPhases.tutor = true;
+      saveLocalProgress();
+    }
+    const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
+    if (hasPost) {
+      S.phase = 'post';
+      S.assMode = 'post';
+      S.assQ = 0;
+      S.assAnswers = [];
+    } else {
+      S.phase = 'debrief';
+    }
+    go();
+    return;
+  }
+  // If week > 0, check availability
+  if (idx > 0) {
+    const days = S.studyConfig.tutorDays || [0, 7, 7, 7];
+    const startDate = new Date(S.metrics.tutorStartDate || Date.now());
+    let cumulative = 0;
+    for (let i = 0; i <= idx; i++) {
+      cumulative += days[i] || 0;
+    }
+    const availableDate = new Date(startDate);
+    availableDate.setDate(availableDate.getDate() + cumulative);
+    if (new Date() < availableDate) {
+      // Show waiting page
+      const formattedDate = formatDateDDMMYYYY(availableDate);
+      const app = document.getElementById('app');
+      app.innerHTML = `${topbarHTML()}<div class="main-card">
+        <h2>⏳ Next Week is Locked</h2>
+        <p>Week ${idx + 1} will be available on <strong>${formattedDate}</strong>.</p>
+        <p>Please return then to continue with the tutor.</p>
+        <div class="actions"><button class="btn btn-secondary" id="btnBackToStudies">📚 Back to Studies</button></div>
+      </div>`;
+      el('btnBackToStudies')?.addEventListener('click', () => {
+        S.phase = 'studySelect';
+        go();
+      });
+      // Skip rendering the actual tutor
+      return;
+    }
+  }
+}
+
   // ---- Render the appropriate view ----
   const app = document.getElementById('app');
   let html = '';
@@ -3709,6 +4048,7 @@ async function go() {
     case 'consent': html = renderConsent(); break;
     case 'reflection': html = renderReflectionDynamic(); break;
     case 'postsurvey': html = renderPostSurveyDynamic(); break;
+    case 'tutor': html = renderTutorDynamic(); break;
     case 'survey': html = renderSurveyDynamic(); break;
     case 'pre':
       if (!S.studyConfig || !S.studyConfig.preQ || S.studyConfig.preQ.length === 0) {
@@ -3859,6 +4199,7 @@ async function go() {
     case 'consent': bindConsent(); break;
     case 'reflection': bindReflectionDynamic(); break;
     case 'postsurvey': bindPostSurveyDynamic(); break;
+    case 'tutor': bindTutorDynamic(); break;
     case 'survey': bindSurveyDynamic(); break;
     case 'pre': bindAssessmentDynamic('pre'); break;
     case 'study': bindStudyDynamic(); break;
