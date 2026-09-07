@@ -408,6 +408,14 @@ function loadLocalProgress() {
     if (S.completedPhases.postSurvey === undefined) {
       S.completedPhases.postSurvey = false;
     }
+
+    // ── FALLBACK: If survey answers exist but survey flag is false, set it to true ──
+    if (S.surveyAnswers && Object.keys(S.surveyAnswers).length > 0 && !S.completedPhases.survey) {
+      console.log('⚠️ Survey answers found but flag was false – correcting');
+      S.completedPhases.survey = true;
+      saveLocalProgress();
+    }
+
     S.puzzlesCompletedCount = saved.puzzlesCompletedCount || 0;
     S.totalPuzzles = saved.totalPuzzles || (S.studyConfig?.puzzles?.length || 0);
     S.postTestPending = saved.postTestPending || false;
@@ -433,7 +441,6 @@ function loadLocalProgress() {
       let updated = false;
       S.metrics.reflections.forEach((ref, idx) => {
         if (ref && typeof ref === 'object' && !ref._submittedAt) {
-          // Check if this reflection has any actual answer (not just empty)
           const hasAnswers = Object.keys(ref).some(k => k !== '_submittedAt' && ref[k] !== undefined && ref[k] !== '');
           if (hasAnswers) {
             const estimatedDate = new Date(startDate);
@@ -1107,6 +1114,13 @@ function bindResume() {
   const hasReflections = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
   const hasPostSurvey = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
   const hasTutor = S.studyConfig?.hasTutor === true;
+ 
+ // ── FALLBACK: If survey answers exist, treat survey as completed ──
+  if (S.surveyAnswers && Object.keys(S.surveyAnswers).length > 0 && !S.completedPhases.survey) {
+    console.log('⚠️ Survey answers found but flag was false – correcting');
+    S.completedPhases.survey = true;
+    saveLocalProgress();
+  }
 
   const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey && !hasTutor;
 
