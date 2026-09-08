@@ -700,17 +700,20 @@ function phaseStripHTML() {
   }).join('')}<span class="phase-label">${phases[currentIndex].label}</span></div>`;
 }
 function renderHero() {
-  // ── Build study cards ──
+ // ── Build study cards ──
   const studyCards = S.availableStudies.length > 0
     ? S.availableStudies.map(study => {
         const isBilingual = !!study.title_ha;
         const langLabel = isBilingual ? 'EN / HA' : 'EN';
         const estTime = study.estimated_time || '30';
+        const isOpen = study.status === 'open';
+        const statusLabel = isOpen ? 'Open' : 'Closed';
+        const statusClass = isOpen ? 'card-status-open' : 'card-status-closed';
         return `
           <div class="card">
             <div class="card-top">
               <h3>${study.title_en}</h3>
-              <span class="card-status">${study.status === 'open' ? 'Open' : 'Closed'}</span>
+              <span class="card-status ${statusClass}">${statusLabel}</span>
             </div>
             <p>${study.description_en || 'Participate in this research study.'}</p>
             <div class="card-facts">
@@ -718,7 +721,9 @@ function renderHero() {
               <span>${langLabel}</span>
               <span>Solo</span>
             </div>
-            <button class="card-cta" data-study-id="${study.id}"> Enrol to learn more  →</button>
+            <button class="card-cta" data-study-id="${study.id}" data-status="${study.status}" ${!isOpen ? 'disabled style="opacity:0.6;cursor:not-allowed;"' : ''}>
+              ${isOpen ? 'Learn more & enrol →' : '🔒 Closed'}
+            </button>
           </div>
         `;
       }).join('')
@@ -991,20 +996,25 @@ function bindHero() {
   });
 
   // ── Study card clicks ──
-  document.querySelectorAll('.card-cta[data-study-id]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const studyId = parseInt(btn.dataset.studyId);
-      if (S.participantCode) {
-        // Already registered → go to study selection
-        S.phase = 'studySelect';
-        go();
-      } else {
-        // Not registered → go to registration
-        S.phase = 'register';
-        go();
-      }
-    });
+document.querySelectorAll('.card-cta[data-study-id]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const studyId = parseInt(btn.dataset.studyId);
+    const status = btn.dataset.status;
+    if (status !== 'open') {
+      alert('🔒 This study is currently closed. Please contact Dr Oladele Campbell (ocampbell@csnigerpoly.com) or check back later when it reopens.');
+      return;
+    }
+    if (S.participantCode) {
+      // Already registered → go to study selection
+      S.phase = 'studySelect';
+      go();
+    } else {
+      // Not registered → go to registration
+      S.phase = 'register';
+      go();
+    }
   });
+});
 
   // ── Admin link (footer) ──
   adminLink?.addEventListener('click', (e) => {
@@ -1341,6 +1351,7 @@ function renderStudySelect() {
   const enrolledStudyIds = S.myEnrolments
     .filter(e => e.status !== 'withdrawn')
     .map(e => e.study_id);
+  // Show all studies (both open and closed) that are not enrolled
   const availableNotEnrolled = S.availableStudies.filter(study => !enrolledStudyIds.includes(study.id));
 
   let followupHtml = '';
@@ -1355,15 +1366,23 @@ function renderStudySelect() {
   return `${topbarHTML()}<div class="main-card"><h2>Available Studies</h2>
     <p>${ongoing.length ? 'Select a new study to begin. Your ongoing studies are listed below.' : 'Select a study to begin. You can participate in multiple studies.'}</p>
     <div class="card-grid">
-      ${availableNotEnrolled.map(study => `
-        <button class="card study-card" data-study-id="${study.id}">
-          <span class="card-emoji">📘</span>
-          <div class="card-label">
-            <strong>${study.title_en}</strong>
-            <div class="card-why">${study.description_en || ''}</div>
-          </div>
-        </button>
-      `).join('')}
+      ${availableNotEnrolled.map(study => {
+        const isOpen = study.status === 'open';
+        const statusLabel = isOpen ? 'Open' : 'Closed';
+        const statusClass = isOpen ? 'card-status-open' : 'card-status-closed';
+        return `
+          <button class="card study-card" data-study-id="${study.id}" data-status="${study.status}" ${!isOpen ? 'disabled style="opacity:0.6;cursor:not-allowed;"' : ''}>
+            <span class="card-emoji">📘</span>
+            <div class="card-label">
+              <strong>${study.title_en}</strong>
+              <div class="card-why">${study.description_en || ''}</div>
+              <div style="font-size:0.7rem; margin-top:4px; color:var(--text-muted);">
+                <span class="${statusClass}">${statusLabel}</span>
+              </div>
+            </div>
+          </button>
+        `;
+      }).join('')}
     </div>
     ${ongoing.length ? `
       <div class="example-box" style="margin-top:20px">
@@ -1374,13 +1393,23 @@ function renderStudySelect() {
     ` : ''}
     ${followupHtml}
   </div>`;
-}
+} 
 
 function bindStudySelect() {
+  // ── Study card clicks ──
   document.querySelectorAll('.card[data-study-id]').forEach(card => {
-    card.onclick = () => onSelectStudy(parseInt(card.dataset.studyId));
+    card.onclick = () => {
+      const studyId = parseInt(card.dataset.studyId);
+      const status = card.dataset.status;
+      if (status !== 'open') {
+        alert('🔒 This study is currently closed. Please contact Dr Oladele Campbell (ocampbell@csnigerpoly.com) or check back later when it reopens.');
+        return;
+      }
+      onSelectStudy(studyId);
+    };
   });
 
+  // ── Resume any ongoing study ──
   const resumeBtn = el('btnResumeAny');
   if (resumeBtn) {
     resumeBtn.addEventListener('click', () => {
@@ -1400,6 +1429,7 @@ function bindStudySelect() {
     });
   }
 
+  // ── Start follow‑up (delayed post‑test) ──
   el('btnStartFollowup')?.addEventListener('click', () => {
     S.assMode = 'post';
     S.assQ = 0;

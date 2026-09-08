@@ -491,7 +491,6 @@ app.get('/api/studies', async (req, res) => {
   const { data, error } = await sb
     .from('studies')
     .select('id, study_key, title_en, title_ha, description_en, description_ha, status, capacity')
-    .eq('status', 'open')
     .or(`end_date.is.null,end_date.gt.${now}`)
     .order('id');
   if (error) return res.status(500).json({ error: error.message });
