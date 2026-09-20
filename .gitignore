@@ -84,3 +84,14 @@ Desktop.ini
 *.swp
 *.swo
 *~
+# Research data exports (contain PII — never commit)
+study_2_export*.csv
+output/
+*.csv
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local backups
+public/js/scriptB.js

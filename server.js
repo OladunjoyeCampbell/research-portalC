@@ -714,6 +714,7 @@ app.post('/api/progress/:enrolmentId', async (req, res) => {
   }
   if (enrolment.status === 'withdrawn') return res.status(403).json({ error: 'Participant has withdrawn' });
 
+  // ── Determine new status ──
   let newStatus = enrolment.status;
   if (progressData.completed) {
     newStatus = 'completed';
@@ -725,9 +726,31 @@ app.post('/api/progress/:enrolmentId', async (req, res) => {
     newStatus = 'in_progress';
   }
 
-  const updates = { data: progressData, last_active: new Date(), status: newStatus };
-  if (progressData.completedAt) { updates.completed_at = new Date(progressData.completedAt); updates.duration_ms = progressData.durationMs; }
-  if (progressData.missingDataFlags) updates.missing_data_flags = progressData.missingDataFlags;
+  // ── Build updates object ──
+  const updates = { 
+    data: progressData, 
+    last_active: new Date(), 
+    status: newStatus 
+  };
+
+  // ── Handle completed_at / duration_ms ──
+  if (newStatus === 'completed') {
+    // Set the completion timestamp
+    updates.completed_at = new Date(progressData.completedAt);
+    updates.duration_ms = progressData.durationMs;
+  } else {
+    // ── FIX: Clear stale completion fields when NOT completed ──
+    if (enrolment.completed_at) {
+      updates.completed_at = null;
+      updates.duration_ms = null;
+    }
+  }
+
+  // ── Store missing data flags if present ──
+  if (progressData.missingDataFlags) {
+    updates.missing_data_flags = progressData.missingDataFlags;
+  }
+
   const { error: updateErr } = await sb.from('enrolments').update(updates).eq('id', enrolmentId);
   if (updateErr) return res.status(500).json({ error: updateErr.message });
   res.json({ saved: true });

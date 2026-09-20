@@ -882,7 +882,7 @@ function bindHero() {
     }
   });
 
-  // ── Resume button (inside the panel) ──
+    // ── Resume button (inside the panel) ──
   doResumeBtn?.addEventListener('click', async () => {
     const code = document.getElementById('resumeCode')?.value.trim().toUpperCase();
     if (!code) {
@@ -890,11 +890,29 @@ function bindHero() {
       return;
     }
     try {
-      // 1. Fetch enrolments
+      // ── 1. Fetch enrolments ──
       let enrolments = await apiGetMyEnrolments(code);
       if (!enrolments.length) throw new Error('No enrolments found for this code');
 
-      // 2. Patch: Show studies with pending reflections/post‑survey as in_progress
+      // ── 1b. Purge stale local "completed" markers for enrolments the server says are NOT completed ──
+      for (const e of enrolments) {
+        if (e.status === 'completed') continue;
+        const key = `research_${code}_${e.id}`;
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        try {
+          const local = JSON.parse(raw);
+          if (local.completed === true) {
+            console.log('🧹 Purging stale local completed flag for enrolment', e.id);
+            delete local.completed;
+            localStorage.setItem(key, JSON.stringify(local));
+          }
+        } catch (err) {
+          console.warn('Failed to parse local progress for enrolment', e.id, err);
+        }
+      }
+
+      // ── 2. PATCH: Show studies with pending reflections/post‑survey as in_progress ──
       const patchedEnrolments = [];
       for (const enrol of enrolments) {
         if (enrol.status === 'completed') {
@@ -928,14 +946,14 @@ function bindHero() {
       }
       enrolments = patchedEnrolments;
 
-      // 3. Filter active (enrolled or in_progress)
+      // ── 3. Filter active (enrolled or in_progress) ──
       const active = enrolments.filter(e => e.status === 'enrolled' || e.status === 'in_progress');
       if (active.length === 0) {
         document.getElementById('resumeErr').innerText = 'You have no studies in progress. All are completed or withdrawn.';
         return;
       }
 
-      // 4. Set participant details
+      // ── 4. Set participant details ──
       const participant = active[0].participant || {};
       S.participantCode = code;
       S.participantName = participant.name || 'Participant';
@@ -945,7 +963,7 @@ function bindHero() {
       S.participantInstitution = participant.institution || '';
       S.participantProgramme = participant.programme || '';
 
-      // 5. Handle multiple active studies
+      // ── 5. Handle multiple active studies ──
       if (active.length > 1) {
         S.resumeCandidates = active;
         S.phase = 'resumeSelect';
@@ -953,7 +971,7 @@ function bindHero() {
         return;
       }
 
-      // 6. Single active study – proceed
+      // ── 6. Single active study – proceed ──
       const enrol = active[0];
       const config = await apiFetchStudyConfig(enrol.study_id);
       if (!config || !config.puzzles) throw new Error('Study configuration missing');
@@ -961,6 +979,9 @@ function bindHero() {
       S.currentStudyId = enrol.study_id;
       S.studyConfig = config;
       S.totalPuzzles = config.puzzles.length;
+
+        // ★ Save enrolments for bindResume()
+      S.myEnrolments = enrolments;
 
       let local = loadLocalProgress();
       if (local) Object.assign(S, local);
@@ -976,7 +997,8 @@ function bindHero() {
       const hasPostSurvey = config.postSurveyFields && config.postSurveyFields.length > 0;
       const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey;
 
-      if (isSurveyOnly && S.completedPhases.survey) {
+      // ── FIX: trust the server-verified status, not the stale local flag ──
+      if (isSurveyOnly && enrol.status === 'completed') {
         S.phase = 'complete';
         go();
         return;
@@ -1099,52 +1121,88 @@ function renderResume() {
     <button class="btn btn-secondary" id="btnResumeRestart">↺ Start fresh</button></div></div>`;
 }
 
-function bindResume() {
+async function bindResume() {
   // If config is missing, reload it
   if (!S.studyConfig) {
     console.warn('bindResume: studyConfig missing, reloading...');
-    apiFetchStudyConfig(S.currentStudyId).then(cfg => {
-      if (cfg) {
-        S.studyConfig = cfg;
-        go();
-      } else {
-        S.phase = 'studySelect';
-        go();
-      }
-    });
+    const cfg = await apiFetchStudyConfig(S.currentStudyId);
+    if (cfg) {
+      S.studyConfig = cfg;
+      go();
+    } else {
+      S.phase = 'studySelect';
+      go();
+    }
     return;
+  }
+
+  // ── Get server status (local first, API fallback) ──
+  async function getServerStatus() {
+    // Try local first
+    if (S.myEnrolments && S.currentEnrolmentId) {
+      const enrol = S.myEnrolments.find(e => e.id === S.currentEnrolmentId);
+      if (enrol) {
+        console.log('✅ Server status from local myEnrolments:', enrol.status);
+        return enrol.status;
+      }
+    }
+    // Fallback: fetch from server
+    try {
+      console.log('⚠️ myEnrolments empty – fetching from API...');
+      const progress = await apiLoadProgress(S.currentEnrolmentId);
+      const status = progress?.status || null;
+      console.log('✅ Server status from API:', status);
+      return status;
+    } catch (e) {
+      console.warn('❌ Failed to fetch server status:', e);
+      return null;
+    }
+  }
+
+  const serverStatus = await getServerStatus();
+  console.log('bindResume: serverStatus =', serverStatus);
+
+  // ── Reset stale local flags that conflict with server ──
+  if (serverStatus === 'in_progress' && S.completedPhases.survey && !S.completedPhases.posttest) {
+    console.log('⚠️ Resetting stale local survey flag (server says in_progress)');
+    S.completedPhases.survey = false;
+    saveLocalProgress();
   }
 
   const continueBtn = document.getElementById('btnResumeContinue');
   const restartBtn = document.getElementById('btnResumeRestart');
 
+  // ── Determine study type ──
   const hasPre = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
   const hasPost = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
   const hasPuzzles = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
   const hasReflections = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
   const hasPostSurvey = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
-  const hasTutor = S.studyConfig?.hasTutor === true;
- 
- // ── FALLBACK: If survey answers exist, treat survey as completed ──
-  if (S.surveyAnswers && Object.keys(S.surveyAnswers).length > 0 && !S.completedPhases.survey) {
-    console.log('⚠️ Survey answers found but flag was false – correcting');
-    S.completedPhases.survey = true;
-    saveLocalProgress();
-  }
 
-  const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey && !hasTutor;
+  const isSurveyOnly = !hasPre && !hasPost && !hasPuzzles && !hasReflections && !hasPostSurvey;
+
+  console.log('bindResume init: hasPre =', hasPre, 'hasPuzzles =', hasPuzzles, 'isSurveyOnly =', isSurveyOnly);
 
   // ── Survey‑only studies ──
   if (isSurveyOnly) {
-    if (S.completedPhases.survey) {
+    // Trust server status
+    if (serverStatus === 'completed') {
+      console.log('✅ Server says completed → going to complete page');
       S.phase = 'complete';
       go();
       return;
-    } else {
-      S.phase = S.consentGeneral ? 'survey' : 'consent';
-      go();
-      return;
     }
+
+    // Server says in-progress / enrolled → continue
+    if (S.consentGeneral) {
+      console.log('→ Resuming survey');
+      S.phase = 'survey';
+    } else {
+      console.log('→ Going to consent');
+      S.phase = 'consent';
+    }
+    go();
+    return;
   }
 
   // ── Delayed post‑test waiting ──
@@ -1154,69 +1212,197 @@ function bindResume() {
     return;
   }
 
-  // ── Continue button logic ──
-  continueBtn?.addEventListener('click', () => {
-    console.log('📌 Resume button clicked');
-    console.log('  consentGeneral:', S.consentGeneral);
-    console.log('  completedPhases.survey:', S.completedPhases.survey);
-    console.log('  hasReflections:', hasReflections);
-    console.log('  hasPostSurvey:', hasPostSurvey);
-    console.log('  hasTutor:', hasTutor);
+  // ── Continue button ──
+  continueBtn?.addEventListener('click', async () => {
+    console.log('🔍 Continue clicked: S.completedPhases =', S.completedPhases);
+    console.log('🔍 S._resumeState =', S._resumeState);
+    console.log('🔍 serverStatus =', serverStatus);
 
-    // Re‑evaluate inside the click handler
     const hasPre2 = S.studyConfig?.preQ && S.studyConfig.preQ.length > 0;
     const hasPost2 = S.studyConfig?.postQ && S.studyConfig.postQ.length > 0;
     const hasPuzzles2 = S.studyConfig?.puzzles && S.studyConfig.puzzles.length > 0;
     const hasReflections2 = S.studyConfig?.reflections && S.studyConfig.reflections.length > 0;
     const hasPostSurvey2 = S.studyConfig?.postSurveyFields && S.studyConfig.postSurveyFields.length > 0;
-    const hasTutor2 = S.studyConfig?.hasTutor === true;
 
-    const isSurveyOnly2 = !hasPre2 && !hasPost2 && !hasPuzzles2 && !hasReflections2 && !hasPostSurvey2 && !hasTutor2;
+    const isSurveyOnly2 = !hasPre2 && !hasPost2 && !hasPuzzles2 && !hasReflections2 && !hasPostSurvey2;
 
-    // ── 1. If consent is not given, go to consent ──
-    if (!S.consentGeneral) {
-      console.log('  → Consent not given – going to consent');
-      S.phase = 'consent';
+    // ── Survey‑only ──
+    if (isSurveyOnly2) {
+      if (serverStatus === 'completed') {
+        S.phase = 'complete';
+        go();
+        return;
+      }
+      if (S.consentGeneral) {
+        S.phase = 'survey';
+      } else {
+        S.phase = 'consent';
+      }
       go();
       return;
     }
 
-    // ── 2. If consent is given but survey not done, go to survey ──
-    if (!S.completedPhases.survey) {
-      console.log('  → Consent given, survey not done – going to survey');
-      S.phase = 'survey';
-      go();
-      return;
-    }
+    const rs = S._resumeState || S.metrics?._resumeState;
 
-    // ── 3. Survey is done – decide next phase ──
-    console.log('  → Survey done – deciding next phase');
-    if (hasPre2) {
-      S.phase = 'pre';
-      S.assMode = 'pre';
-      S.assQ = S.assAnswers.length || 0;
-    } else if (hasPost2) {
-      S.phase = 'post';
-      S.assMode = 'post';
-      S.assQ = 0;
-      S.assAnswers = [];
-    } else if (hasReflections2) {
-      const done = S.metrics?.reflections ? S.metrics.reflections.length : 0;
-      S.reflectionWeek = done;
-      S.phase = 'reflection';
-    } else if (hasPostSurvey2) {
-      S.phase = 'postsurvey';
-    } else if (hasTutor2) {
-      // ── Tutor study ──
-      if (!S.metrics.tutorWeek) S.metrics.tutorWeek = 0;
-      if (!S.metrics.tutorHistory) S.metrics.tutorHistory = [];
-      if (!S.metrics.tutorSessions) S.metrics.tutorSessions = [];
-      if (!S.metrics.tutorStartDate) S.metrics.tutorStartDate = Date.now();
-      S.phase = 'tutor';
-    } else if (S.completedPhases.posttest) {
+    // If immediate post‑test is done, check for pending reflections/post‑survey
+    if (S.completedPhases.posttest) {
+      if (hasReflections2 || hasPostSurvey2) {
+        const reflectionsDone = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+        const totalReflections = S.studyConfig?.reflections ? S.studyConfig.reflections.length : 0;
+        if (reflectionsDone < totalReflections) {
+          S.reflectionWeek = reflectionsDone;
+          S.phase = 'reflection';
+          go();
+          return;
+        } else if (hasPostSurvey2 && !S.completedPhases.postSurvey) {
+          S.phase = 'postsurvey';
+          go();
+          return;
+        }
+      }
       S.phase = 'complete';
+      go();
+      return;
+    }
+
+    if (rs) {
+      if (rs.phase === 'survey' && S.completedPhases.survey) {
+        if (hasPre2) {
+          S.phase = 'pre';
+          S.assMode = 'pre';
+          S.assQ = 0;
+          S.assAnswers = [];
+        } else if (hasPost2) {
+          S.phase = 'post';
+          S.assMode = 'post';
+          S.assQ = 0;
+          S.assAnswers = [];
+        } else if (hasReflections2) {
+          const done = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+          S.reflectionWeek = done;
+          S.phase = 'reflection';
+        } else if (hasPostSurvey2) {
+          S.phase = 'postsurvey';
+        } else {
+          S.phase = 'complete';
+        }
+      } else {
+        // ── RESTORE FROM SAVED RESUME STATE ──
+        S.phase = rs.phase || 'survey';
+        S.puzzleIdx = rs.puzzleIdx || 0;
+        S.assQ = rs.assQ || 0;
+        S.assAnswers = rs.assAnswers || [];
+        S.surveyAnswers = rs.surveyAnswers || {};
+        S.postSurveyAnswers = rs.postSurveyAnswers || {};
+        S.reviewQueue = rs.reviewQueue || [];
+        S.reviewIdx = rs.reviewIdx || 0;
+        S.available = rs.available || [];
+        S.userSeq = rs.userSeq || [];
+        S.fadedLocked = rs.fadedLocked || [];
+
+        const savedReflectionWeek = rs.reflectionWeek;
+        if (savedReflectionWeek !== undefined && savedReflectionWeek !== null && savedReflectionWeek > 0) {
+          S.reflectionWeek = savedReflectionWeek;
+        } else {
+          S.reflectionWeek = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+        }
+
+        if (rs.completedPhases) {
+          S.completedPhases = { ...S.completedPhases, ...rs.completedPhases };
+        }
+      }
     } else {
-      // For puzzle studies without pre/post tests – fallback
+      // ── No resume state – determine from progress flags ──
+      console.log('⚠️ No resume state – determining from progress flags');
+
+      if (S.completedPhases.posttest) {
+        if (hasReflections2 || hasPostSurvey2) {
+          const reflectionsDone = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+          const totalReflections = S.studyConfig?.reflections ? S.studyConfig.reflections.length : 0;
+          if (reflectionsDone < totalReflections) {
+            S.reflectionWeek = reflectionsDone;
+            S.phase = 'reflection';
+            go();
+            return;
+          } else if (hasPostSurvey2 && !S.completedPhases.postSurvey) {
+            S.phase = 'postsurvey';
+            go();
+            return;
+          }
+        }
+        S.phase = 'complete';
+        go();
+        return;
+      }
+
+      if (S.completedPhases.puzzles && !S.completedPhases.posttest) {
+        const minDays = S.studyConfig?.min_days_between_pretest_posttest || 0;
+        if (minDays > 0 && S.metrics?.preCompletedAt) {
+          const daysSince = (Date.now() - new Date(S.metrics.preCompletedAt)) / (86400000);
+          if (daysSince < minDays) {
+            S.postTestPending = true;
+            S.phase = 'complete';
+            saveLocalProgress();
+            go();
+            return;
+          } else {
+            S.phase = 'post';
+            S.assMode = 'post';
+            S.assQ = 0;
+            S.assAnswers = [];
+            go();
+            return;
+          }
+        } else {
+          S.phase = 'post';
+          S.assMode = 'post';
+          S.assQ = 0;
+          S.assAnswers = [];
+          go();
+          return;
+        }
+      }
+
+      if (S.completedPhases.pretest && !S.completedPhases.puzzles) {
+        S.phase = 'study';
+        S.puzzleIdx = S.puzzlesCompletedCount || 0;
+        go();
+        return;
+      }
+
+      if (S.completedPhases.survey && !S.completedPhases.pretest) {
+        console.log('✅ Survey done, pre‑test not started – going to pre‑test');
+        if (hasPre2) {
+          S.phase = 'pre';
+          S.assMode = 'pre';
+          S.assQ = S.assAnswers.length || 0;
+          go();
+          return;
+        } else if (hasPost2) {
+          S.phase = 'post';
+          S.assMode = 'post';
+          S.assQ = 0;
+          S.assAnswers = [];
+          go();
+          return;
+        } else if (hasReflections2) {
+          const done = S.metrics?.reflections ? S.metrics.reflections.length : 0;
+          S.reflectionWeek = done;
+          S.phase = 'reflection';
+          go();
+          return;
+        } else if (hasPostSurvey2) {
+          S.phase = 'postsurvey';
+          go();
+          return;
+        } else {
+          S.phase = 'complete';
+          go();
+          return;
+        }
+      }
+
+      console.log('⚠️ No progress found – starting from orient');
       S.phase = 'orient';
     }
     go();
@@ -1227,17 +1413,13 @@ function bindResume() {
     if (confirm('Erase all progress?')) {
       localStorage.removeItem(getStorageKey());
       S.metrics = { startedAt: Date.now(), puzzles: {} };
-      S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false, postSurvey: false, tutor: false };
+      S.completedPhases = { survey: false, pretest: false, puzzles: false, posttest: false, followup: false, postSurvey: false };
       S.puzzlesCompletedCount = 0;
       S.surveyAnswers = {};
       S.assAnswers = [];
       S.postTestPending = false;
       S.postSurveyAnswers = {};
       S.reflectionWeek = 0;
-      S.metrics.tutorWeek = 0;
-      S.metrics.tutorHistory = [];
-      S.metrics.tutorSessions = [];
-      S.metrics.tutorStartDate = null;
       S.phase = 'orient';
       saveLocalProgress();
       go();
@@ -3270,8 +3452,18 @@ async function renderComplete() {
   // ── CHECK: Did we just complete the follow‑up? ──
   const justCompletedFollowup = followupCompleted && S.completedPhases.followup === true;
 
-      // ── SURVEY‑ONLY STUDY (Study 2) ──
+        // ── SURVEY‑ONLY STUDY (Study 2) ──
   if (isSurveyOnly && S.completedPhases.survey) {
+    // ★ GUARD: only proceed if the SERVER says this enrolment is completed.
+    // Prevents stale local flags from re-marking an in-progress enrolment as completed.
+    const enrol = S.myEnrolments?.find(e => e.id === S.currentEnrolmentId);
+    if (!enrol || enrol.status !== 'completed') {
+      console.warn('renderComplete() reached for survey-only, but server status is not "completed" — redirecting to resume');
+      S.phase = 'resume';
+      go();
+      return '';
+    }
+
     if (!S.completedSaved) {
       S.completedSaved = true;
       S.completedPhases.posttest = true;
@@ -3303,6 +3495,7 @@ async function renderComplete() {
         saveLocalProgress({ completed: true });
       }
     }
+    // ... the certificate HTML `return` continues here, unchanged ...
     
     // Show survey completion certificate
     return `${topbarHTML()}<div class="main-card">
@@ -4124,7 +4317,7 @@ if (resumeCode) {
         patchedEnrolments.push(enrol);
       }
       S.myEnrolments = patchedEnrolments;
-      await syncCompletionStatus();
+      // await syncCompletionStatus();
     }
   }
 
