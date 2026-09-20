@@ -1843,6 +1843,7 @@ function renderSurveyDynamic() {
   let html = `${topbarHTML()}${phaseStripHTML()}<div class="main-card"><h2>📋 ${surveyTitle}</h2>`;
   
   fields.forEach(f => {
+    // ── Section heading ──
     if (f.type === 'section') {
       html += `<div class="survey-section">
         <h3>${f.label_en}</h3>
@@ -1851,11 +1852,16 @@ function renderSurveyDynamic() {
       </div>`;
       return;
     }
+
+    // Skip auto‑filled programme field
     if (f.id === 'programme') return;
+
+    // ── SELECT ──
     if (f.type === 'select') {
       const label = L(f, 'label');
       let opts = L(f, 'options');
-      
+
+      // Dynamic level options (unchanged)
       if (f.id === 'level' || f.id === 'demographics_level') {
         const progType = getProgrammeType(S.participantMatric);
         if (f.id === 'demographics_level') {
@@ -1864,35 +1870,72 @@ function renderSurveyDynamic() {
           else opts = ['100 level', '200 level', '300 level', '400 level', '500 level / PG', 'Other'];
         } else {
           if (S.studyConfig?.bilingual === true && S.studyLang === 'ha') {
-            if (progType === 'nd') opts = ['ND Shekara 1','ND Shekara 2'];
-            else if (progType === 'hnd') opts = ['HND Shekara 1','HND Shekara 2'];
-            else opts = ['Shekara 1','Shekara 2','Shekara 3','Shekara 4'];
+            if (progType === 'nd') opts = ['ND Shekara 1', 'ND Shekara 2'];
+            else if (progType === 'hnd') opts = ['HND Shekara 1', 'HND Shekara 2'];
+            else opts = ['Shekara 1', 'Shekara 2', 'Shekara 3', 'Shekara 4'];
           } else {
-            if (progType === 'nd') opts = ['ND Year 1','ND Year 2'];
-            else if (progType === 'hnd') opts = ['HND Year 1','HND Year 2'];
-            else opts = ['Year 1','Year 2','Year 3','Year 4'];
+            if (progType === 'nd') opts = ['ND Year 1', 'ND Year 2'];
+            else if (progType === 'hnd') opts = ['HND Year 1', 'HND Year 2'];
+            else opts = ['Year 1', 'Year 2', 'Year 3', 'Year 4'];
           }
         }
       }
-      
-      html += `<div class="field-row"><label>${label}</label><select data-field="${f.id}" class="sv-sel"><option value="">— select —</option>${opts.map((o,i)=>`<option value="${i}">${o}</option>`).join('')}</select></div>`;
-    } else if (f.type === 'likert') {
+
+      // Preserve selected value
+      const currentVal = S.surveyAnswers[f.id];
+      const selectedIndex = (currentVal !== undefined && currentVal !== null && currentVal !== '') 
+        ? String(currentVal) 
+        : '';
+
+      html += `<div class="field-row">
+        <label>${label}</label>
+        <select data-field="${f.id}" class="sv-sel">
+          <option value="">— select —</option>
+          ${opts.map((o, i) => `<option value="${i}" ${selectedIndex === String(i) ? 'selected' : ''}>${o}</option>`).join('')}
+        </select>
+      </div>`;
+
+      // ── Conditional text field (if configured) ──
+      if (f.conditionalText) {
+        const ct = f.conditionalText;
+        const ctLabel = L(ct, 'label') || 'Please specify';
+        const ctPlaceholder = ct.placeholder || '';
+        const ctValue = S.surveyAnswers[ct.fieldId] || '';
+
+        // Determine if the conditional field should be visible now
+        const triggerIndex = opts.indexOf(ct.triggerValue);
+        const isTriggered = (triggerIndex !== -1) && (selectedIndex === String(triggerIndex));
+
+        html += `<div class="field-row conditional-text" id="cond_${f.id}" style="display:${isTriggered ? 'block' : 'none'}; margin-top:-8px;">
+          <label style="display:block; font-weight:600; margin-bottom:6px;">${ctLabel}${ct.required ? ' *' : ''}</label>
+          <input type="text" data-field="${ct.fieldId}" class="sv-cond-text" placeholder="${ctPlaceholder}" value="${escapeHtml(ctValue)}" />
+        </div>`;
+      }
+    }
+
+    // ── LIKERT ──
+    else if (f.type === 'likert') {
       const label = L(f, 'label');
       let options = L(f, 'options');
       if (!options || options.length === 0) {
         options = ['1', '2', '3', '4', '5'];
         console.warn(`Likert field "${f.id}" had no options; using default 1-5.`);
       }
+      const currentVal = S.surveyAnswers[f.id];
       html += `<div class="likert-row"><div class="lq">${label}</div><div class="likert-scale">`;
       options.forEach((opt, idx) => {
         const val = idx + 1;
+        const checked = (currentVal == val) ? 'checked' : '';
         html += `<div class="lk-opt">
-          <input type="radio" name="${f.id}" id="${f.id}_${val}" value="${val}" data-field="${f.id}" class="sv-lk">
+          <input type="radio" name="${f.id}" id="${f.id}_${val}" value="${val}" data-field="${f.id}" class="sv-lk" ${checked}>
           <label for="${f.id}_${val}"><span class="lk-num">${val}</span><span>${opt}</span></label>
         </div>`;
       });
       html += `</div></div>`;
-    } else if (f.type === 'checkbox') {
+    }
+
+    // ── CHECKBOX ──
+    else if (f.type === 'checkbox') {
       const label = L(f, 'label');
       const options = L(f, 'options') || [];
       const selected = S.surveyAnswers[f.id] || [];
@@ -1904,16 +1947,21 @@ function renderSurveyDynamic() {
         </label>`;
       });
       html += `</div></div>`;
-    } else if (f.type === 'text') {
+    }
+
+    // ── TEXT ──
+    else if (f.type === 'text') {
       const label = L(f, 'label');
       const placeholder = L(f, 'placeholder') || 'Write your answer here…';
+      const currentVal = S.surveyAnswers[f.id] || '';
       html += `<div class="field-row" style="margin-bottom:20px;">
         <label style="display:block; font-weight:600; margin-bottom:6px;">${label}</label>
-        <textarea data-field="${f.id}" class="sv-text" placeholder="${placeholder}" style="width:100%; padding:10px; border-radius:12px; border:1.5px solid var(--border); min-height:80px; font-family:inherit; resize:vertical;"></textarea>
+        <textarea data-field="${f.id}" class="sv-text" placeholder="${placeholder}" style="width:100%; padding:10px; border-radius:12px; border:1.5px solid var(--border); min-height:80px; font-family:inherit; resize:vertical;">${escapeHtml(currentVal)}</textarea>
       </div>`;
     }
   });
   
+  // ── Button label logic ──
   const hasPre = S.studyConfig.preQ && S.studyConfig.preQ.length > 0;
   const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
   const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
@@ -1927,7 +1975,6 @@ function renderSurveyDynamic() {
     <p id="surveyMsg" style="color:var(--danger);text-align:center"></p></div>`;
   return html;
 }
-
 // ============================================================
 // BIND SURVEY (PRE‑SURVEY) – with CHECKBOX handling & new transition
 // ============================================================
@@ -1948,17 +1995,14 @@ function bindSurveyDynamic() {
   // ── Validate gender mismatch ──
   function validateGender() {
     if (!genderField) return true;
-    
+
     const surveyGenderValue = S.surveyAnswers[genderField.id];
     const enrolmentGender = S.participantGender;
-    
-    // If no survey answer yet, skip validation
+
     if (surveyGenderValue === undefined || surveyGenderValue === null || surveyGenderValue === '') return true;
-    
-    // If enrolment gender is empty, skip validation
     if (!enrolmentGender) return true;
-    
-    // ── Convert survey value to label ──
+
+    // Convert survey value to label
     let surveyGenderLabel = '';
     const surveyValueNum = parseInt(surveyGenderValue);
     if (!isNaN(surveyValueNum) && surveyValueNum >= 0 && surveyValueNum < genderOptions.length) {
@@ -1966,18 +2010,15 @@ function bindSurveyDynamic() {
     } else {
       surveyGenderLabel = String(surveyGenderValue);
     }
-    
-    // Check if they match (case-insensitive)
+
     const isMatch = surveyGenderLabel.toLowerCase() === enrolmentGender.toLowerCase();
-    
-    // Show/hide warning message
+
     let warningEl = document.getElementById('genderWarning');
-    
+
     if (!warningEl) {
       warningEl = document.createElement('div');
       warningEl.id = 'genderWarning';
-      
-      // ── Dark mode aware styles ──
+
       const isDark = document.documentElement.classList.contains('dark');
       warningEl.style.cssText = `
         background: ${isDark ? '#451a03' : '#fef3c7'};
@@ -1989,8 +2030,7 @@ function bindSurveyDynamic() {
         font-size: 0.95rem;
         color: ${isDark ? '#fbbf24' : '#78350f'};
       `;
-      
-      // Insert after the gender field
+
       const genderFieldEl = document.querySelector(`[data-field="${genderField.id}"]`)?.closest('.field-row');
       if (genderFieldEl) {
         genderFieldEl.after(warningEl);
@@ -2001,7 +2041,7 @@ function bindSurveyDynamic() {
         }
       }
     }
-    
+
     if (!isMatch) {
       warningEl.style.display = 'block';
       warningEl.innerHTML = `
@@ -2016,7 +2056,34 @@ function bindSurveyDynamic() {
     }
   }
 
+  // ── Toggle conditional text fields based on selected value ──
+  function updateConditionalFields() {
+    fields.forEach(f => {
+      if (f.type === 'select' && f.conditionalText) {
+        const sel = document.querySelector(`select[data-field="${f.id}"]`);
+        const condWrap = document.getElementById(`cond_${f.id}`);
+        if (!sel || !condWrap) return;
+
+        const ct = f.conditionalText;
+        const selectedText = sel.options[sel.selectedIndex]?.textContent || '';
+        const isTriggered = (selectedText === ct.triggerValue);
+
+        condWrap.style.display = isTriggered ? 'block' : 'none';
+
+        // If no longer triggered, clear the conditional answer
+        if (!isTriggered) {
+          delete S.surveyAnswers[ct.fieldId];
+          const input = condWrap.querySelector('.sv-cond-text');
+          if (input) input.value = '';
+        }
+      }
+    });
+  }
+
   const updateBtn = () => {
+    // ── Toggle conditional fields first ──
+    updateConditionalFields();
+
     // Capture selections
     document.querySelectorAll('.sv-sel').forEach(sel => {
       if (sel.value !== '') {
@@ -2029,6 +2096,11 @@ function bindSurveyDynamic() {
     document.querySelectorAll('.sv-text').forEach(textarea => {
       if (textarea.value.trim() !== '') {
         S.surveyAnswers[textarea.dataset.field] = textarea.value.trim();
+      }
+    });
+    document.querySelectorAll('.sv-cond-text').forEach(input => {
+      if (input.value.trim() !== '') {
+        S.surveyAnswers[input.dataset.field] = input.value.trim();
       }
     });
     // Checkboxes: store as array
@@ -2049,17 +2121,32 @@ function bindSurveyDynamic() {
     const requiredFields = fields.filter(f => f.id && f.id !== 'programme' && f.type !== 'section');
     const allFilled = requiredFields.every(f => {
       const val = S.surveyAnswers[f.id];
+
+      // Checkbox
       if (f.type === 'checkbox') {
-        // For checkbox, ensure at least one is selected
         return Array.isArray(val) && val.length > 0;
-      } else {
-        return val !== undefined && val !== null && val !== '';
       }
+
+      // Base select must have a value
+      if (val === undefined || val === null || val === '') return false;
+
+      // Conditional text validation
+      if (f.type === 'select' && f.conditionalText) {
+        const ct = f.conditionalText;
+        const opts = L(f, 'options') || [];
+        const triggerIdx = opts.indexOf(ct.triggerValue);
+        if (triggerIdx !== -1 && String(triggerIdx) === String(val)) {
+          const ctVal = S.surveyAnswers[ct.fieldId];
+          if (ctVal === undefined || ctVal === null || ctVal === '') return false;
+        }
+      }
+
+      return true;
     });
 
     // Button is enabled only if all fields are filled AND gender is valid
     if (btn) btn.disabled = !(allFilled && isGenderValid);
-    
+
     const msg = el('surveyMsg');
     if (msg) {
       if (!allFilled) {
@@ -2072,7 +2159,7 @@ function bindSurveyDynamic() {
     }
   };
 
-  // Bind events for existing types
+  // ── Bind select change handlers ──
   document.querySelectorAll('.sv-sel').forEach(sel => {
     sel.addEventListener('change', () => {
       S.surveyAnswers[sel.dataset.field] = sel.value;
@@ -2081,6 +2168,7 @@ function bindSurveyDynamic() {
     });
   });
 
+  // ── Bind likert radio handlers ──
   document.querySelectorAll('.sv-lk').forEach(radio => {
     radio.addEventListener('change', () => {
       if (radio.checked) {
@@ -2091,6 +2179,7 @@ function bindSurveyDynamic() {
     });
   });
 
+  // ── Bind textarea handlers ──
   document.querySelectorAll('.sv-text').forEach(textarea => {
     textarea.addEventListener('input', () => {
       S.surveyAnswers[textarea.dataset.field] = textarea.value.trim();
@@ -2099,7 +2188,16 @@ function bindSurveyDynamic() {
     });
   });
 
-  // NEW: Bind checkboxes
+  // ── Bind conditional text inputs ──
+  document.querySelectorAll('.sv-cond-text').forEach(input => {
+    input.addEventListener('input', () => {
+      S.surveyAnswers[input.dataset.field] = input.value.trim();
+      updateBtn();
+      saveLocalProgress();
+    });
+  });
+
+  // ── Bind checkboxes ──
   document.querySelectorAll('.sv-chk').forEach(chk => {
     chk.addEventListener('change', () => {
       const field = chk.dataset.field;
@@ -2114,22 +2212,22 @@ function bindSurveyDynamic() {
     });
   });
 
-  // ── Also re-validate when gender field changes (for dropdown) ──
+  // ── Re-validate when gender field changes ──
   if (genderField) {
     const genderSelect = document.querySelector(`[data-field="${genderField.id}"]`);
     if (genderSelect) {
       genderSelect.addEventListener('change', () => {
-        // Small delay to let the value be captured
         setTimeout(updateBtn, 50);
       });
     }
   }
 
+  // Initial validation pass
   updateBtn();
 
-  // Submit / Continue
+  // ── Submit / Continue ──
   el('btnSurveyNext')?.addEventListener('click', () => {
-    // Final capture (same as updateBtn but ensure all saved)
+    // Final capture
     document.querySelectorAll('.sv-sel').forEach(sel => {
       if (sel.value !== '') S.surveyAnswers[sel.dataset.field] = sel.value;
     });
@@ -2138,6 +2236,9 @@ function bindSurveyDynamic() {
     });
     document.querySelectorAll('.sv-text').forEach(textarea => {
       if (textarea.value.trim() !== '') S.surveyAnswers[textarea.dataset.field] = textarea.value.trim();
+    });
+    document.querySelectorAll('.sv-cond-text').forEach(input => {
+      if (input.value.trim() !== '') S.surveyAnswers[input.dataset.field] = input.value.trim();
     });
     document.querySelectorAll('.sv-chk').forEach(chk => {
       const field = chk.dataset.field;
@@ -2148,16 +2249,36 @@ function bindSurveyDynamic() {
         S.surveyAnswers[field] = S.surveyAnswers[field].filter(v => v !== chk.value);
       }
     });
-    
-    // ── Final gender validation before submission ──
+
+    // ── Final gender validation ──
     const isGenderValid = validateGender();
     if (!isGenderValid) {
       const msg = el('surveyMsg');
       if (msg) msg.textContent = '⚠️ Please correct the gender mismatch before continuing.';
-      // Scroll to the warning
       const warningEl = document.getElementById('genderWarning');
       if (warningEl) warningEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return; // Stop submission
+      return;
+    }
+
+    // ── Final conditional text validation ──
+    const requiredFields = fields.filter(f => f.id && f.id !== 'programme' && f.type !== 'section');
+    for (const f of requiredFields) {
+      if (f.type === 'select' && f.conditionalText) {
+        const ct = f.conditionalText;
+        const opts = L(f, 'options') || [];
+        const triggerIdx = opts.indexOf(ct.triggerValue);
+        const selectedVal = S.surveyAnswers[f.id];
+        if (triggerIdx !== -1 && String(triggerIdx) === String(selectedVal)) {
+          const ctVal = S.surveyAnswers[ct.fieldId];
+          if (ctVal === undefined || ctVal === null || ctVal === '') {
+            const msg = el('surveyMsg');
+            if (msg) msg.textContent = `⚠️ Please enter a value for "${ct.label_en || 'Please specify'}".`;
+            const condWrap = document.getElementById(`cond_${f.id}`);
+            if (condWrap) condWrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+          }
+        }
+      }
     }
 
     saveLocalProgress();
@@ -2166,7 +2287,7 @@ function bindSurveyDynamic() {
     S.inProgressPhase = 'pretest';
     saveLocalProgress();
 
-    // ── NEW TRANSITION LOGIC ─────────────────────────────
+    // ── Transition logic ──
     const hasPre = S.studyConfig.preQ && S.studyConfig.preQ.length > 0;
     const hasPost = S.studyConfig.postQ && S.studyConfig.postQ.length > 0;
     const hasPuzzles = S.studyConfig.puzzles && S.studyConfig.puzzles.length > 0;
@@ -2181,7 +2302,6 @@ function bindSurveyDynamic() {
       } else if (hasPostSurvey) {
         S.phase = 'postsurvey';
       } else {
-        // No tests, no reflections, no post‑survey → complete
         console.log('Survey-only study completed.');
         S.completedSaved = true;
         S.completedPhases.posttest = true;
@@ -2189,7 +2309,7 @@ function bindSurveyDynamic() {
         S.phase = 'debrief';
       }
     } else {
-      // Existing flow for studies with puzzles/tests
+      // Study with puzzles/tests
       if (hasPre) {
         S.phase = 'pre';
         S.assMode = 'pre';
@@ -3890,35 +4010,54 @@ async function go() {
     S.phase = 'adminLogin';
   }
 
-  // ---- Improved resume from URL parameter ----
-  const resumeCode = urlParams.get('resume');
-  if (resumeCode && S.phase === 'hero') {
+  // ---- Resume from URL parameter (takes priority over admin) ----
+const resumeCode = urlParams.get('resume');
+if (resumeCode) {
+  // If an admin is currently logged in, log them out first
+  if (S.isAdminMode || S.phase === 'dashboard' || S.phase === 'adminLogin') {
+    console.log('🔓 Admin session detected during resume – logging out admin first');
+    try {
+      await fetch(`${API_BASE}/api/admin/logout`, { method: 'POST', credentials: 'include' });
+    } catch (e) {
+      console.warn('Admin logout failed (continuing anyway):', e);
+    }
+    S.isAdminMode = false;
+    S.phase = 'hero';
+    // Reset any admin-related state
+    S.participantCode = null;
+    S.currentEnrolmentId = null;
+    S.currentStudyId = null;
+    S.studyConfig = null;
+    S.metrics = null;
+    S.surveyAnswers = {};
+    S.assAnswers = [];
+    S.postSurveyAnswers = {};
+    S.reflectionWeek = 0;
+  }
+
+  if (S.phase === 'hero') {
     console.log('📌 Resume code detected:', resumeCode);
-    
-    // Function to attempt resume
+
     const attemptResume = () => {
       const inp = document.getElementById('resumeCode');
       const btn = document.getElementById('btnDoResume');
       const panel = document.getElementById('resumePanel');
-      
+
       if (!inp || !btn) {
         console.warn('Resume elements not found, retrying...');
         setTimeout(attemptResume, 200);
         return;
       }
-      
-      // Show the resume panel
+
       if (panel) panel.style.display = 'block';
-      
-      // Fill the code
       inp.value = resumeCode;
       console.log('✅ Filled resume code, clicking button...');
       btn.click();
     };
-    
-    // Wait for the page to render and handlers to attach
+
     setTimeout(attemptResume, 300);
   }
+}
 
   // ---- Reload study config if needed ----
   const phasesNeedingConfig = ['orient','consent','survey','pre','study','faded','attempt','reflect','code','review','post','followup','guided','debrief','complete','resume'];

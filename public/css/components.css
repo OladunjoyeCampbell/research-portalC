@@ -1086,3 +1086,17 @@ footer a {
   background: #374151;
   color: #9ca3af;
 }
+
+.conditional-text input.sv-cond-text {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1.5px solid var(--input-border);
+  border-radius: 20px;
+  background: var(--input-bg);
+  color: var(--text-color);
+  font-size: 0.9rem;
+}
+.conditional-text input.sv-cond-text:focus {
+  outline: none;
+  border-color: var(--primary);
+}
