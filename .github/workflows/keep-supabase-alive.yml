@@ -10,9 +10,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Supabase REST API
+        env:
+          REF:  ${{ secrets.SUPABASE_PROJECT_REF }}
+          ANON: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          curl -X GET "https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co/rest/v1/studies?limit=1" \
-               -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+          if [ -z "$REF" ] || [ -z "$ANON" ]; then
+            echo "Missing SUPABASE_PROJECT_REF or SUPABASE_ANON_KEY"; exit 1
+          fi
+          curl -X GET "https://${REF}.supabase.co/rest/v1/studies?limit=1" \
+               -H "apikey: ${ANON}" \
                -H "Content-Type: application/json" \
                --fail --retry 3 --retry-delay 5 --max-time 10
 
@@ -30,12 +36,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '22'
+          cache: 'npm'
       - run: npm install
       - name: Send reflection reminders
         run: node scripts/send-reflection-reminders.js
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          RESEND_API_KEY:       ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM:           ${{ secrets.EMAIL_FROM }}
