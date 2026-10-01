@@ -34,11 +34,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'npm'
-      - run: npm install
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Debug — what is actually running here?
+        run: |
+          echo "=== node version ==="
+          node --version
+          echo "=== which node ==="
+          which node
+          echo "=== script first 20 lines ==="
+          head -n 20 scripts/send-reflection-reminders.js
+          echo "=== repo HEAD ==="
+          git log -1 --oneline
+          echo "=== ls scripts ==="
+          ls -la scripts/
+
       - name: Send reflection reminders
         run: node scripts/send-reflection-reminders.js
         env:
