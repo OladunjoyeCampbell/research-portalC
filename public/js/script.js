@@ -2132,15 +2132,18 @@ function renderSurveyDynamic() {
     }
 
     // ── TEXT ──
-    else if (f.type === 'text') {
-      const label = L(f, 'label');
-      const placeholder = L(f, 'placeholder') || 'Write your answer here…';
-      const currentVal = S.surveyAnswers[f.id] || '';
-      html += `<div class="field-row" style="margin-bottom:20px;">
-        <label style="display:block; font-weight:600; margin-bottom:6px;">${label}</label>
-        <textarea data-field="${f.id}" class="sv-text" placeholder="${placeholder}" style="width:100%; padding:10px; border-radius:12px; border:1.5px solid var(--border); min-height:80px; font-family:inherit; resize:vertical;">${escapeHtml(currentVal)}</textarea>
-      </div>`;
-    }
+	else if (f.type === 'text') {
+	  const label = L(f, 'label');
+	  const placeholder = L(f, 'placeholder') || 'Write your answer here…';
+	  const currentVal = S.surveyAnswers[f.id] || '';
+	  const optHint = f.optional === true
+		? ' <span style="font-size:0.85rem;color:var(--muted);font-weight:normal;">(optional)</span>'
+		: '';
+	  html += `<div class="field-row" style="margin-bottom:20px;">
+		<label style="display:block; font-weight:600; margin-bottom:6px;">${label}${optHint}</label>
+		<textarea data-field="${f.id}" class="sv-text" placeholder="${placeholder}" style="width:100%; padding:10px; border-radius:12px; border:1.5px solid var(--border); min-height:80px; font-family:inherit; resize:vertical;">${escapeHtml(currentVal)}</textarea>
+	  </div>`;
+	}
   });
   
   // ── Button label logic ──
@@ -2300,12 +2303,14 @@ function bindSurveyDynamic() {
     const isGenderValid = validateGender();
 
     // Check required fields (skip 'programme' and sections)
-    const requiredFields = fields.filter(f => f.id && f.id !== 'programme' && f.type !== 'section');
-    const allFilled = requiredFields.every(f => {
-      const val = S.surveyAnswers[f.id];
+	const requiredFields = fields.filter(f => f.id && f.id !== 'programme' && f.type !== 'section');
+	const allFilled = requiredFields.every(f => {
+	  if (f.optional === true) return true;   // ← NEW: optional fields can be left blank
 
-      // Checkbox
-      if (f.type === 'checkbox') {
+	  const val = S.surveyAnswers[f.id];
+
+	  // Checkbox
+	  if (f.type === 'checkbox') {
         return Array.isArray(val) && val.length > 0;
       }
 
