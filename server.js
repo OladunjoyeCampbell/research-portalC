@@ -22,9 +22,9 @@ const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const MODELS = {
-  groq: process.env.LLM_MODEL_GROQ || 'groq/compound',
+  groq:     process.env.LLM_MODEL_GROQ     || 'openai/gpt-oss-20b',
   deepseek: process.env.LLM_MODEL_DEEPSEEK || 'deepseek-chat',
-  openai: process.env.LLM_MODEL_OPENAI || 'gpt-4o-mini'
+  openai:   process.env.LLM_MODEL_OPENAI   || 'gpt-4o-mini'
 };
 
 // ============================================================
@@ -37,7 +37,6 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 if (!ELEVENLABS_API_KEY) {
     throw new Error("ELEVENLABS_API_KEY is missing from .env");
 }
-
 if (!ELEVENLABS_VOICE_ID) {
     throw new Error("ELEVENLABS_VOICE_ID is missing from .env");
 }
@@ -52,33 +51,24 @@ const pgSession = require('connect-pg-simple')(session);
 const { createClient } = require('@supabase/supabase-js');
 const { Resend } = require('resend');
 
-const axios = require('axios');          // ElevenLabs API
-const fs = require('fs');                // Cache audio files
-const crypto = require('crypto');        // Generate cache filenames
-
+const axios = require('axios');
+const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 
 const app = express();
 app.set('trust proxy', 1);
 
 // ============================================================
-// ADDED: ElevenLabs audio cache folder
+// ElevenLabs audio cache folder
 // ============================================================
 
-const AUDIO_CACHE_DIR = path.join(
-    __dirname,
-    'public',
-    'audio',
-    'cache'
-);
-
+const AUDIO_CACHE_DIR = path.join(__dirname, 'public', 'audio', 'cache');
 if (!fs.existsSync(AUDIO_CACHE_DIR)) {
-    fs.mkdirSync(AUDIO_CACHE_DIR, {
-        recursive: true
-    });
+    fs.mkdirSync(AUDIO_CACHE_DIR, { recursive: true });
 }
 
-// CORS (allow localhost and Render origin)
+// CORS
 const allowedOrigins = [
   'http://localhost:3000',
   'https://research-portalc.onrender.com'
@@ -88,13 +78,9 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '8mb' }));
-// ADDED: Support form-encoded request bodies
-app.use(express.urlencoded({
-  extended: true,
-  limit: '8mb'
-}));
+app.use(express.urlencoded({ extended: true, limit: '8mb' }));
 
-// Serve static frontend files from /public
+// Serve static frontend files
 app.use(express.static(path.join(__dirname, 'public')));
 
 // PostgreSQL session store
@@ -147,10 +133,7 @@ async function sendEmail(to, subject, html) {
       subject,
       html
     });
-    if (error) {
-      console.error('Resend error:', error);
-      return false;
-    }
+    if (error) { console.error('Resend error:', error); return false; }
     console.log(`Email sent to ${to} (ID: ${data?.id})`);
     return true;
   } catch (err) {
@@ -158,13 +141,30 @@ async function sendEmail(to, subject, html) {
     return false;
   }
 }
-// =========================================
+
+// ============================================================
+// PASSWORD HASHING (scrypt) – for admin_users
+// ============================================================
+
+function hashPassword(plain) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(plain, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(plain, stored) {
+  if (!stored || !stored.includes(':')) return false;
+  const [salt, hash] = stored.split(':');
+  const candidate = crypto.scryptSync(plain, salt, 64).toString('hex');
+  const a = Buffer.from(hash, 'hex');
+  const b = Buffer.from(candidate, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 // ============================================================
 // TUTOR FUNCTIONS – LLM Logic for TunaniGini
 // ============================================================
 
-// ── LLM response generator ──
 async function getLLMResponse(messages) {
   try {
     if (LLM_PROVIDER === 'groq') {
@@ -185,7 +185,7 @@ async function getLLMResponse(messages) {
         max_tokens: 500
       });
       return response.choices[0].message.content;
-    } else { // openai
+    } else {
       const client = new OpenAI({ apiKey: OPENAI_API_KEY });
       const response = await client.chat.completions.create({
         model: MODELS.openai,
@@ -201,7 +201,6 @@ async function getLLMResponse(messages) {
   }
 }
 
-// ── Topic detection ──
 function inferTopic(userMsg) {
   const userLower = userMsg.toLowerCase();
   const topics = {
@@ -212,24 +211,18 @@ function inferTopic(userMsg) {
     function: ['function', 'def', 'aiki'],
     array: ['array', 'list', 'jeri bayanai']
   };
-  let detected = 'general';
   for (const [topic, keywords] of Object.entries(topics)) {
-    if (keywords.some(kw => userLower.includes(kw))) {
-      detected = topic;
-      break;
-    }
+    if (keywords.some(kw => userLower.includes(kw))) return topic;
   }
-  return detected;
+  return 'general';
 }
 
-// ── Struggle detection ──
 function detectStruggle(assistantReply) {
   const strugglePhrases = ['try again', 'mistake', 'error', "let's review", 'kuskure', 'sake dubawa', 'ba daidai ba'];
   const lower = assistantReply.toLowerCase();
   return strugglePhrases.some(phrase => lower.includes(phrase));
 }
 
-// ── System prompts ──
 function getSystemPrompt(lang) {
   if (lang === 'en') {
     return `You are a patient bilingual (English-Hausa) logic tutor for novice Nigerian higher education computing students.
@@ -258,8 +251,8 @@ TUTOR RULES:
 9. Always end with an encouraging question or next small step.
 10. If the student sends a long message, encourage them to break it down into smaller steps and send one at a time.
 `;
-  } else {
-    return `Kai mai haƙuri ne mai koyar da dabaru da harsuna biyu (Turanci-Hausa) ga ɗaliban kwamfuta na manyan makarantu a Najeriya.
+  }
+  return `Kai mai haƙuri ne mai koyar da dabaru da harsuna biyu (Turanci-Hausa) ga ɗaliban kwamfuta na manyan makarantu a Najeriya.
 
 DOKOKIN TSARA (MANDATORY - KA BISU SOSAI):
 - Idan kana jera matakai, ka sanya KOWANE mataki a SABON LAYI ta amfani da \n.
@@ -285,11 +278,10 @@ DOKOKIN KOYARWA:
 9. Koyaushe ka ƙare da tambaya mai ƙarfafawa ko mataki na gaba kaɗan.
 10. Idan ɗalibi ya aika saƙo mai tsawo, ka ƙarfafa su su raba shi zuwa ƙananan matakai su aika ɗaya bayan ɗaya.
 `;
-  }
 }
 
 // ============================================================
-// Helper functions (existing)
+// Helper functions
 // ============================================================
 
 function generateParticipantCode() {
@@ -339,20 +331,12 @@ async function generateUniqueParticipantCode() {
 
     if (error) {
       console.error('Error checking participant code uniqueness:', error);
-      const fallbackCode = `AL-${Date.now().toString(36).toUpperCase()}`;
-      return fallbackCode;
+      return `AL-${Date.now().toString(36).toUpperCase()}`;
     }
-
-    if (!data) {
-      exists = false;
-    }
+    if (!data) exists = false;
     attempts++;
   }
-
-  if (attempts >= maxAttempts) {
-    return `AL-${Date.now().toString(36).toUpperCase()}`;
-  }
-
+  if (attempts >= maxAttempts) return `AL-${Date.now().toString(36).toUpperCase()}`;
   return code;
 }
 
@@ -370,7 +354,7 @@ function formatDateForNigeria(dateString) {
 async function logAdminAction(req, action, targetType, targetId, details) {
   const ip = req.ip || req.connection.remoteAddress || 'unknown';
   await sb.from('admin_audit_log').insert({
-    admin_pin: req.session?.admin ? 'authenticated' : 'unknown',
+    admin_pin: req.session?.adminEmail || 'unknown',
     action,
     target_type: targetType,
     target_id: String(targetId),
@@ -379,9 +363,40 @@ async function logAdminAction(req, action, targetType, targetId, details) {
   });
 }
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+// ============================================================
+// ADMIN AUTHENTICATION (multi-user)
+// ============================================================
+
 function isAdminLoggedIn(req) {
-  return req.session && req.session.admin === true;
+  return req.session && req.session.adminId;
+}
+
+function requireAdmin(req, res, next) {
+  if (!isAdminLoggedIn(req)) return res.status(401).json({ error: 'Unauthorised – please log in' });
+  next();
+}
+
+function requirePI(req, res, next) {
+  if (!isAdminLoggedIn(req)) return res.status(401).json({ error: 'Unauthorised' });
+  if (req.session.adminRole !== 'pi') return res.status(403).json({ error: 'PI access required' });
+  next();
+}
+
+function canAccessStudy(req, studyId) {
+  if (req.session.adminRole === 'pi') return true;
+  return (req.session.adminStudies || []).map(Number).includes(Number(studyId));
+}
+
+async function getAdminPermissions(req) {
+  if (req.session.adminRole === 'pi') {
+    return { can_export: true, can_manage_portal: true, can_send_reminders: true, can_view_participant: true };
+  }
+  const { data } = await sb
+    .from('admin_users')
+    .select('can_export, can_manage_portal, can_send_reminders, can_view_participant')
+    .eq('id', req.session.adminId)
+    .single();
+  return data || { can_export: false, can_manage_portal: false, can_send_reminders: false, can_view_participant: false };
 }
 
 // ============================================================
@@ -415,31 +430,76 @@ app.post('/api/tutor/chat', async (req, res) => {
 });
 
 // ============================================================
-// ADMIN AUTHENTICATION (existing)
+// ADMIN AUTHENTICATION
 // ============================================================
-app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body;
-  if (password === ADMIN_PASSWORD) {
-    req.session.admin = true;
-    req.session.save();
-    return res.json({ success: true });
-  }
-  res.status(401).json({ error: 'Invalid password' });
+
+app.post('/api/admin/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+
+  const { data: admin, error } = await sb
+    .from('admin_users')
+    .select('*')
+    .ilike('email', email.trim())
+    .maybeSingle();
+
+  if (error || !admin) return res.status(401).json({ error: 'Invalid credentials' });
+  if (!admin.is_active) return res.status(403).json({ error: 'Account disabled' });
+  if (!verifyPassword(password, admin.password_hash)) return res.status(401).json({ error: 'Invalid credentials' });
+
+  req.session.adminId          = admin.id;
+  req.session.adminRole        = admin.role;
+  req.session.adminStudies     = admin.scoped_studies || [];
+  req.session.adminInstitution = admin.institution || null;
+  req.session.adminEmail       = admin.email;
+  req.session.adminName        = admin.name;
+  await req.session.save();
+
+  await sb.from('admin_users').update({ last_login: new Date() }).eq('id', admin.id);
+
+  res.json({
+    success: true,
+    name: admin.name,
+    role: admin.role,
+    institution: admin.institution
+  });
 });
+
 app.post('/api/admin/logout', (req, res) => {
   req.session.destroy();
   res.json({ success: true });
 });
+
 app.get('/api/admin/check', (req, res) => {
-  res.json({ loggedIn: isAdminLoggedIn(req) });
+  res.json({
+    loggedIn: isAdminLoggedIn(req) ? true : false,
+    name: req.session?.adminName || null,
+    role: req.session?.adminRole || null,
+    institution: req.session?.adminInstitution || null
+  });
 });
-function requireAdmin(req, res, next) {
-  if (!isAdminLoggedIn(req)) return res.status(401).json({ error: 'Unauthorised – please log in' });
-  next();
-}
 
+// ============================================================
+// PUBLIC DROPDOWN OPTIONS
+// ============================================================
+app.get('/api/dropdown-options', async (req, res) => {
+  const category = req.query.category;
+  if (!category) return res.status(400).json({ error: 'category required' });
 
-// Participant check and code recovery endpoints
+  const { data, error } = await sb
+    .from('dropdown_options')
+    .select('value, display_order')
+    .eq('category', category)
+    .eq('active', true)
+    .order('display_order', { ascending: true });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data.map(r => r.value));
+});
+
+// ============================================================
+// PARTICIPANT CHECK & CODE RECOVERY
+// ============================================================
 app.get('/api/participant/check', async (req, res) => {
   const { matric } = req.query;
   if (!matric) return res.status(400).json({ error: 'matric required' });
@@ -449,11 +509,8 @@ app.get('/api/participant/check', async (req, res) => {
     .ilike('matric', matric.trim().toUpperCase())
     .maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
-  if (data) {
-    return res.json({ exists: true, participantCode: data.participant_code, email: data.email });
-  } else {
-    return res.json({ exists: false });
-  }
+  if (data) return res.json({ exists: true, participantCode: data.participant_code, email: data.email });
+  return res.json({ exists: false });
 });
 
 app.post('/api/participant/send-code', async (req, res) => {
@@ -478,14 +535,13 @@ app.post('/api/participant/send-code', async (req, res) => {
     <small>If you did not request this, please ignore this email.</small>
   `;
   const sent = await sendEmail(data.email, subject, html);
-  if (sent) {
-    res.json({ success: true });
-  } else {
-    res.status(500).json({ error: 'Failed to send email' });
-  }
+  if (sent) return res.json({ success: true });
+  return res.status(500).json({ error: 'Failed to send email' });
 });
 
-// PUBLIC ENDPOINTS
+// ============================================================
+// PUBLIC STUDIES
+// ============================================================
 app.get('/api/studies', async (req, res) => {
   const now = new Date().toISOString();
   const { data, error } = await sb
@@ -508,13 +564,17 @@ app.get('/api/studies/:id/config', async (req, res) => {
   res.json({ ...data.config, instruments: data.instruments, delayed_post_test_weeks: data.delayed_post_test_weeks });
 });
 
-// MODIFIED: /api/enrol – studyId optional
+// ============================================================
+// ENROL
+// ============================================================
 app.post('/api/enrol', async (req, res) => {
-  const { name, matric, lang, studyId, demographics, consentGeneral, academicSession, classSection, lecturerId, email, gender } = req.body;
+  const {
+    name, matric, lang, studyId, demographics, consentGeneral,
+    academicSession, classSection, lecturerId, email, gender, institution
+  } = req.body;
 
-  if (!name || !matric) {
-    return res.status(400).json({ error: 'name and matric are required' });
-  }
+  if (!name || !matric) return res.status(400).json({ error: 'name and matric are required' });
+  if (!institution) return res.status(400).json({ error: 'institution is required' });
 
   let participant;
   const { data: existing } = await sb
@@ -534,37 +594,38 @@ app.post('/api/enrol', async (req, res) => {
     if (lecturerId) updates.lecturer_id = lecturerId;
     if (email) updates.email = email;
     if (gender) updates.gender = gender;
+    if (institution) updates.institution = institution;
     if (Object.keys(updates).length) await sb.from('participants').update(updates).eq('id', participant.id);
   } else {
-  const code = await generateUniqueParticipantCode();
-  const { data: newPart, error } = await sb.from('participants').insert({
-    participant_code: code,
-    name: name.trim(),
-    matric: matric.trim().toUpperCase(),
-    lang: lang || 'en',
-    demographics: demographics || {},
-    consent_general: consentGeneral || false,
-    academic_session: academicSession,
-    class_section: classSection,
-    lecturer_id: lecturerId,
-    email: email || null,
-    gender: gender || null
-  }).select().single();
-  if (error) {
-    // Check if it's a duplicate code error (just in case)
-    if (error.code === '23505') { // PostgreSQL unique violation
-      return res.status(409).json({ error: 'System error: duplicate participant code. Please try again.' });
+    const code = await generateUniqueParticipantCode();
+    const { data: newPart, error } = await sb.from('participants').insert({
+      participant_code: code,
+      name: name.trim(),
+      matric: matric.trim().toUpperCase(),
+      institution,
+      lang: lang || 'en',
+      demographics: demographics || {},
+      consent_general: consentGeneral || false,
+      academic_session: academicSession,
+      class_section: classSection,
+      lecturer_id: lecturerId,
+      email: email || null,
+      gender: gender || null
+    }).select().single();
+    if (error) {
+      if (error.code === '23505') {
+        return res.status(409).json({ error: 'System error: duplicate participant code. Please try again.' });
+      }
+      return res.status(500).json({ error: error.message });
     }
-    return res.status(500).json({ error: error.message });
+    participant = newPart;
   }
-  participant = newPart;
-}
 
-  // If no studyId, just return participant info
+  // If no studyId, return participant info only
   if (!studyId) {
     return res.json({
       participantCode: participant.participant_code,
-      participantId: participant.id,
+      participantId: participant.id
     });
   }
 
@@ -598,42 +659,33 @@ app.post('/api/enrol', async (req, res) => {
     enrolment = existingEnrol;
     if (enrolment.status === 'withdrawn') {
       console.log(`Deleting withdrawn enrolment ${enrolment.id} for participant ${participant.id}`);
-      const { error: delErr } = await sb
-        .from('enrolments')
-        .delete()
-        .eq('id', enrolment.id);
+      const { error: delErr } = await sb.from('enrolments').delete().eq('id', enrolment.id);
       if (delErr) {
         console.error('Delete error:', delErr);
         return res.status(500).json({ error: 'Failed to delete withdrawn enrolment' });
       }
       const randomGroup = assignRandomisationGroup();
       const instrumentVersion = study.config?.version || '1.0.0';
-      const { data: newEnrol, error } = await sb
-        .from('enrolments')
-        .insert({
-          participant_id: participant.id,
-          study_id: studyId,
-          status: 'enrolled',
-          randomisation_group: randomGroup,
-          instrument_version: instrumentVersion,
-          data: {}
-        })
-        .select()
-        .single();
+      const { data: newEnrol, error } = await sb.from('enrolments').insert({
+        participant_id: participant.id,
+        study_id: studyId,
+        status: 'enrolled',
+        randomisation_group: randomGroup,
+        instrument_version: instrumentVersion,
+        data: {}
+      }).select().single();
       if (error) {
         console.error('Insert error:', error);
         return res.status(500).json({ error: 'Failed to create new enrolment' });
       }
-      enrolment = newEnrol;
-      res.json({
+      return res.json({
         participantCode: participant.participant_code,
-        enrolmentId: enrolment.id,
+        enrolmentId: newEnrol.id,
         studyId,
         isNew: true,
-        randomisationGroup: enrolment.randomisation_group,
+        randomisationGroup: newEnrol.randomisation_group,
         participantId: participant.id
       });
-      return;
     }
     if (enrolment.status === 'completed') {
       return res.status(403).json({ error: 'You have already completed this study' });
@@ -641,18 +693,14 @@ app.post('/api/enrol', async (req, res) => {
   } else {
     const randomGroup = assignRandomisationGroup();
     const instrumentVersion = study.config?.version || '1.0.0';
-    const { data: newEnrol, error } = await sb
-      .from('enrolments')
-      .insert({
-        participant_id: participant.id,
-        study_id: studyId,
-        status: 'enrolled',
-        randomisation_group: randomGroup,
-        instrument_version: instrumentVersion,
-        data: {}
-      })
-      .select()
-      .single();
+    const { data: newEnrol, error } = await sb.from('enrolments').insert({
+      participant_id: participant.id,
+      study_id: studyId,
+      status: 'enrolled',
+      randomisation_group: randomGroup,
+      instrument_version: instrumentVersion,
+      data: {}
+    }).select().single();
     if (error) return res.status(500).json({ error: error.message });
     enrolment = newEnrol;
   }
@@ -667,12 +715,15 @@ app.post('/api/enrol', async (req, res) => {
   });
 });
 
+// ============================================================
+// ENROLMENTS / PROGRESS
+// ============================================================
 app.get('/api/enrolments/me', async (req, res) => {
   const { code } = req.query;
   if (!code) return res.status(400).json({ error: 'participant_code required' });
   const { data: participant, error: pErr } = await sb
     .from('participants')
-    .select('id, name, email, gender, participant_code, matric')
+    .select('id, name, email, gender, participant_code, matric, institution')
     .eq('participant_code', code)
     .single();
   if (pErr || !participant) return res.status(404).json({ error: 'Participant not found' });
@@ -688,7 +739,8 @@ app.get('/api/enrolments/me', async (req, res) => {
       email: participant.email,
       gender: participant.gender,
       participant_code: participant.participant_code,
-      matric: participant.matric
+      matric: participant.matric,
+      institution: participant.institution
     }
   }));
   res.json(result);
@@ -707,14 +759,12 @@ app.post('/api/progress/:enrolmentId', async (req, res) => {
   const { data: enrolment, error } = await sb.from('enrolments').select('*, study:study_id(*)').eq('id', enrolmentId).single();
   if (error) return res.status(404).json({ error: 'Enrolment not found' });
   const study = enrolment.study;
-  
-  // Allow completion updates even when study is closed; block all other updates if not open
+
   if (study.status !== 'open' && !progressData.completed && enrolment.status !== 'withdrawn') {
     return res.status(403).json({ error: 'Study is closed – no further progress accepted' });
   }
   if (enrolment.status === 'withdrawn') return res.status(403).json({ error: 'Participant has withdrawn' });
 
-  // ── Determine new status ──
   let newStatus = enrolment.status;
   if (progressData.completed) {
     newStatus = 'completed';
@@ -726,27 +776,18 @@ app.post('/api/progress/:enrolmentId', async (req, res) => {
     newStatus = 'in_progress';
   }
 
-  // ── Build updates object ──
-  const updates = { 
-    data: progressData, 
-    last_active: new Date(), 
-    status: newStatus 
-  };
+  const updates = { data: progressData, last_active: new Date(), status: newStatus };
 
-  // ── Handle completed_at / duration_ms ──
   if (newStatus === 'completed') {
-    // Set the completion timestamp
     updates.completed_at = new Date(progressData.completedAt);
     updates.duration_ms = progressData.durationMs;
   } else {
-    // ── FIX: Clear stale completion fields when NOT completed ──
     if (enrolment.completed_at) {
       updates.completed_at = null;
       updates.duration_ms = null;
     }
   }
 
-  // ── Store missing data flags if present ──
   if (progressData.missingDataFlags) {
     updates.missing_data_flags = progressData.missingDataFlags;
   }
@@ -759,28 +800,21 @@ app.post('/api/progress/:enrolmentId', async (req, res) => {
 app.post('/api/enrolment/:enrolmentId/withdraw', async (req, res) => {
   const { enrolmentId } = req.params;
   console.log('Attempting to withdraw enrolment:', enrolmentId);
-
   const { data: enrolment, error } = await sb.from('enrolments').select('*').eq('id', enrolmentId).single();
   if (error) {
     console.error('Enrolment not found:', error);
     return res.status(404).json({ error: 'Enrolment not found' });
   }
-
   if (enrolment.status === 'completed' || enrolment.status === 'withdrawn') {
-    console.log('Enrolment already completed or withdrawn:', enrolment.status);
     return res.status(400).json({ error: 'Cannot withdraw completed or already withdrawn enrolment' });
   }
-
   const { error: updateErr } = await sb.from('enrolments')
     .update({ status: 'withdrawn', withdrawn_at: new Date(), data: {} })
     .eq('id', enrolmentId);
-
   if (updateErr) {
     console.error('Withdrawal update failed:', updateErr);
     return res.status(500).json({ error: 'Withdrawal failed' });
   }
-
-  console.log('Withdrawal successful for enrolment:', enrolmentId);
   res.json({ success: true, enrolmentId });
 });
 
@@ -789,14 +823,26 @@ app.get('/api/study/:studyId/average_gain', async (req, res) => {
   const { data, error } = await sb.from('enrolments').select('data').eq('study_id', studyId).eq('status', 'completed');
   if (error) return res.status(500).json({ error });
   let gains = [];
-  data.forEach(e => { const pre = e.data?.preScore, post = e.data?.postScore; if (typeof pre === 'number' && typeof post === 'number') gains.push(post - pre); });
+  data.forEach(e => {
+    const pre = e.data?.preScore, post = e.data?.postScore;
+    if (typeof pre === 'number' && typeof post === 'number') gains.push(post - pre);
+  });
   const avg = gains.length ? gains.reduce((a,b)=>a+b,0)/gains.length : 0;
   res.json({ averageGain: avg, participantCount: gains.length });
 });
 
-// ADMIN ENDPOINTS
+// ============================================================
+// ADMIN ENDPOINTS (scoped)
+// ============================================================
+
 app.get('/api/admin/studies', requireAdmin, async (req, res) => {
-  const { data, error } = await sb.from('studies').select('*').order('id');
+  let query = sb.from('studies').select('*').order('id');
+  if (req.session.adminRole !== 'pi') {
+    const scoped = (req.session.adminStudies || []).map(Number);
+    if (!scoped.length) return res.json([]);
+    query = query.in('id', scoped);
+  }
+  const { data, error } = await query;
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
@@ -804,6 +850,11 @@ app.get('/api/admin/studies', requireAdmin, async (req, res) => {
 app.post('/api/admin/control', requireAdmin, async (req, res) => {
   const { study_id, status, capacity } = req.body;
   if (!study_id) return res.status(400).json({ error: 'study_id required' });
+  if (!canAccessStudy(req, study_id)) return res.status(403).json({ error: 'Not authorised for this study' });
+
+  const perms = await getAdminPermissions(req);
+  if (!perms.can_manage_portal) return res.status(403).json({ error: 'Portal management not enabled for this account' });
+
   const updates = {};
   if (status) updates.status = status;
   if (capacity) updates.capacity = capacity;
@@ -816,6 +867,8 @@ app.post('/api/admin/control', requireAdmin, async (req, res) => {
 app.get('/api/admin/status', requireAdmin, async (req, res) => {
   const studyId = req.query.study;
   if (!studyId) return res.status(400).json({ error: 'study query param required' });
+  if (!canAccessStudy(req, studyId)) return res.status(403).json({ error: 'Not authorised for this study' });
+
   const { data: study } = await sb.from('studies').select('status, capacity, end_date').eq('id', studyId).single();
   if (!study) return res.status(404).json({ error: 'Study not found' });
   const { count: enrolled } = await sb.from('enrolments').select('*', { count: 'exact', head: true }).eq('study_id', studyId);
@@ -826,11 +879,20 @@ app.get('/api/admin/status', requireAdmin, async (req, res) => {
 
 app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
   const { studyId } = req.params;
+  if (!canAccessStudy(req, studyId)) return res.status(403).json({ error: 'Not authorised for this study' });
+
+  const perms = await getAdminPermissions(req);
+  if (!perms.can_export) return res.status(403).json({ error: 'Export not enabled for this account' });
+
   const { data, error } = await sb
     .from('enrolments')
-    .select(`*, participant:participant_id (name, matric, participant_code, demographics, lang, academic_session, class_section, lecturer_id, email, gender)`)
+    .select(`*, participant:participant_id (name, matric, participant_code, demographics, lang, academic_session, class_section, lecturer_id, email, gender, institution)`)
     .eq('study_id', studyId);
   if (error) return res.status(500).json({ error: error.message });
+
+  const filtered = (req.session.adminRole === 'pi' || !req.session.adminInstitution)
+    ? data
+    : data.filter(e => (e.participant?.institution || '') === req.session.adminInstitution);
 
   const flatten = (obj, prefix = '') => {
     let result = {};
@@ -847,9 +909,8 @@ app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
     return result;
   };
 
-  const rows = data.map(enrol => {
+  const rows = filtered.map(enrol => {
     const flat = flatten({ enrolment: enrol, participant: enrol.participant });
-    // Format any field that looks like an ISO date string
     for (const key of Object.keys(flat)) {
       const val = flat[key];
       if (typeof val === 'string' && val.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)) {
@@ -872,16 +933,27 @@ app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
 app.post('/api/admin/send-reminders', requireAdmin, async (req, res) => {
   const { studyId, daysInactive = 3 } = req.body;
   if (!studyId) return res.status(400).json({ error: 'studyId required' });
+  if (!canAccessStudy(req, studyId)) return res.status(403).json({ error: 'Not authorised for this study' });
+
+  const perms = await getAdminPermissions(req);
+  if (!perms.can_send_reminders) return res.status(403).json({ error: 'Reminders not enabled for this account' });
+
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - daysInactive);
-  const { data: inactive, error } = await sb
+
+  const { data: inactiveRaw, error } = await sb
     .from('enrolments')
-    .select('id, participant:participant_id(name, email, participant_code), last_active, reminder_count, study:study_id(title_en)')
+    .select('id, participant:participant_id(name, email, participant_code, institution), last_active, reminder_count, study:study_id(title_en)')
     .eq('study_id', studyId)
     .in('status', ['enrolled', 'in_progress'])
     .lt('last_active', cutoff.toISOString())
     .lt('reminder_count', 3);
   if (error) return res.status(500).json({ error: error.message });
+
+  const inactive = (req.session.adminRole === 'pi' || !req.session.adminInstitution)
+    ? inactiveRaw
+    : inactiveRaw.filter(e => (e.participant?.institution || '') === req.session.adminInstitution);
+
   const results = [];
   for (const e of inactive) {
     const email = e.participant?.email;
@@ -902,181 +974,81 @@ app.post('/api/admin/send-reminders', requireAdmin, async (req, res) => {
   await logAdminAction(req, 'send_reminders', 'study', studyId, { daysInactive, count: inactive.length, results });
   res.json({ total: inactive.length, results });
 });
+
 // ============================================================
-// ElevenLabs Hausa Text-to-Speech API
-// Cached version (recommended)
+// ElevenLabs Hausa Text-to-Speech API (cached)
 // ============================================================
 
 app.post('/api/speak', async (req, res) => {
-
     try {
-
-        // -------------------------------
-        // Validate input
-        // -------------------------------
-
         const text = (req.body?.text || '').trim();
-
         if (!text) {
-            return res.status(400).json({
-                success: false,
-                error: 'No text supplied.'
-            });
+            return res.status(400).json({ success: false, error: 'No text supplied.' });
         }
 
-        // -------------------------------
-        // Configuration
-        // -------------------------------
-
         const MODEL_ID = 'eleven_multilingual_v2';
-
-        const VOICE_SETTINGS = {
-            stability: 0.50,
-            similarity_boost: 0.75
-        };
-
-        // -------------------------------
-        // Create cache filename
-        // Cache changes automatically if
-        // voice or model changes
-        // -------------------------------
+        const VOICE_SETTINGS = { stability: 0.50, similarity_boost: 0.75 };
 
         const hash = crypto
             .createHash('sha256')
-            .update(
-                ELEVENLABS_VOICE_ID +
-                "|" +
-                MODEL_ID +
-                "|" +
-                JSON.stringify(VOICE_SETTINGS) +
-                "|" +
-                text
-            )
+            .update(ELEVENLABS_VOICE_ID + "|" + MODEL_ID + "|" + JSON.stringify(VOICE_SETTINGS) + "|" + text)
             .digest('hex');
 
-        const cacheFile = path.join(
-            AUDIO_CACHE_DIR,
-            `${hash}.mp3`
-        );
-
-        // -------------------------------
-        // Serve cached audio
-        // -------------------------------
+        const cacheFile = path.join(AUDIO_CACHE_DIR, `${hash}.mp3`);
 
         if (fs.existsSync(cacheFile)) {
-
             console.log(`[CACHE] ${text}`);
-
             return res.sendFile(cacheFile);
-
         }
 
         console.log(`[TTS] ${text}`);
 
-        // -------------------------------
-        // Generate speech
-        // -------------------------------
-
         const response = await axios({
-
             method: 'POST',
-
-            url:
-                `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
-
+            url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
             responseType: 'arraybuffer',
-
             headers: {
-
                 'Accept': 'audio/mpeg',
-
                 'Content-Type': 'application/json',
-
                 'xi-api-key': ELEVENLABS_API_KEY
-
             },
-
-            data: {
-
-                text,
-
-                model_id: MODEL_ID,
-
-                voice_settings: VOICE_SETTINGS
-
-            }
-
+            data: { text, model_id: MODEL_ID, voice_settings: VOICE_SETTINGS }
         });
 
-        // -------------------------------
-        // Save to cache
-        // -------------------------------
-
-        fs.writeFileSync(
-            cacheFile,
-            response.data
-        );
-
-        console.log(
-            `[SAVED] ${path.basename(cacheFile)} (${response.data.length} bytes)`
-        );
-
-        // -------------------------------
-        // Return audio
-        // -------------------------------
+        fs.writeFileSync(cacheFile, response.data);
+        console.log(`[SAVED] ${path.basename(cacheFile)} (${response.data.length} bytes)`);
 
         res.setHeader('Content-Type', 'audio/mpeg');
-
-        res.setHeader(
-            'Cache-Control',
-            'public, max-age=31536000'
-        );
-
+        res.setHeader('Cache-Control', 'public, max-age=31536000');
         return res.send(response.data);
 
-    }
-
-    catch (err) {
-
+    } catch (err) {
         console.log('\n====================================');
         console.log('ELEVENLABS ERROR');
         console.log('====================================');
-
         console.log('Voice ID:', ELEVENLABS_VOICE_ID);
-
         console.log('Status:', err.response?.status);
-
         console.log('Message:', err.message);
-
         if (Buffer.isBuffer(err.response?.data)) {
-
             console.log(err.response.data.toString());
-
         } else {
-
             console.log(err.response?.data);
-
         }
-
         console.log('====================================\n');
 
         return res.status(500).json({
-
             success: false,
-
             error: 'Speech generation failed.',
-
             detail: Buffer.isBuffer(err.response?.data)
                 ? err.response.data.toString()
                 : err.response?.data
-
         });
-
     }
-
 });
 
-
+// ============================================================
+// CATCH-ALL
+// ============================================================
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'API not found' });
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
