@@ -469,16 +469,11 @@ app.post('/api/admin/login', async (req, res) => {
   await sb.from('admin_users').update({ last_login: new Date() }).eq('id', admin.id);
 
   res.json({
-  success: true,
-  name: admin.name,
-  role: admin.role,
-  institution: admin.institution,
-  permissions: {
-    can_export: admin.role === 'pi' ? true : admin.can_export,
-    can_manage_portal: admin.role === 'pi' ? true : admin.can_manage_portal,
-    can_send_reminders: admin.role === 'pi' ? true : admin.can_send_reminders,
-    can_view_participant: admin.role === 'pi' ? true : admin.can_view_participant
-  }
+    success: true,
+    name: admin.name,
+    role: admin.role,
+    institution: admin.institution
+  });
 });
 
 app.post('/api/admin/logout', (req, res) => {
@@ -887,33 +882,10 @@ app.get('/api/admin/status', requireAdmin, async (req, res) => {
 
   const { data: study } = await sb.from('studies').select('status, capacity, end_date').eq('id', studyId).single();
   if (!study) return res.status(404).json({ error: 'Study not found' });
-
-  const scopedInstitution = (req.session.adminRole === 'pi') ? null : req.session.adminInstitution;
-  const perms = await getAdminPermissions(req);
-
-  let query = sb
-    .from('enrolments')
-    .select('status, participant:participant_id(institution)')
-    .eq('study_id', studyId);
-  const { data: rows, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
-
-  const filtered = scopedInstitution
-    ? rows.filter(r => (r.participant?.institution || '') === scopedInstitution)
-    : rows;
-
-  const enrolled   = filtered.length;
-  const completed  = filtered.filter(r => r.status === 'completed').length;
-  const inProgress = filtered.filter(r => r.status === 'in_progress').length;
-
-  res.json({
-    status: study.status,
-    capacity: study.capacity,
-    end_date: study.end_date,
-    enrolled, completed, inProgress,
-    scope: scopedInstitution || 'all-sites',
-    can_manage: perms.can_manage_portal
-  });
+  const { count: enrolled } = await sb.from('enrolments').select('*', { count: 'exact', head: true }).eq('study_id', studyId);
+  const { count: completed } = await sb.from('enrolments').select('*', { count: 'exact', head: true }).eq('study_id', studyId).eq('status', 'completed');
+  const { count: inProgress } = await sb.from('enrolments').select('*', { count: 'exact', head: true }).eq('study_id', studyId).eq('status', 'in_progress');
+  res.json({ status: study.status, capacity: study.capacity, end_date: study.end_date, enrolled, completed, inProgress });
 });
 
 app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
