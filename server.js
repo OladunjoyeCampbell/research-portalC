@@ -938,15 +938,26 @@ app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
   const perms = await getAdminPermissions(req);
   if (!perms.can_export) return res.status(403).json({ error: 'Export not enabled for this account' });
 
+  const isPI = req.session.adminRole === 'pi';
+  const scopedInstitution = isPI ? null : (req.session.adminInstitution || null);
+
+  // A co-researcher with export permission but no institution is a config error,
+  // not a licence to see every site's data. Fail closed with a clear message.
+  if (!isPI && !scopedInstitution) {
+    return res.status(403).json({
+      error: 'Your account has export permission but no institution is set. Please contact the PI.'
+    });
+  }
+
   const { data, error } = await sb
     .from('enrolments')
     .select(`*, participant:participant_id (name, matric, participant_code, demographics, lang, academic_session, class_section, lecturer_id, email, gender, institution)`)
     .eq('study_id', studyId);
   if (error) return res.status(500).json({ error: error.message });
 
-  const filtered = (req.session.adminRole === 'pi' || !req.session.adminInstitution)
+  const filtered = isPI
     ? data
-    : data.filter(e => (e.participant?.institution || '') === req.session.adminInstitution);
+    : data.filter(e => (e.participant?.institution || '') === scopedInstitution);
 
   const flatten = (obj, prefix = '') => {
     let result = {};
@@ -992,6 +1003,18 @@ app.post('/api/admin/send-reminders', requireAdmin, async (req, res) => {
   const perms = await getAdminPermissions(req);
   if (!perms.can_send_reminders) return res.status(403).json({ error: 'Reminders not enabled for this account' });
 
+  const isPI = req.session.adminRole === 'pi';
+  const scopedInstitution = isPI ? null : (req.session.adminInstitution || null);
+
+  if (!isPI && !scopedInstitution) {
+    await logAdminAction(req, 'send_reminders_blocked', 'study', studyId, {
+      reason: 'no institution set on co-researcher account'
+    });
+    return res.status(403).json({
+      error: 'Your account has reminder permission but no institution is set. Please contact the PI.'
+    });
+  }
+
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - daysInactive);
 
@@ -1004,9 +1027,9 @@ app.post('/api/admin/send-reminders', requireAdmin, async (req, res) => {
     .lt('reminder_count', 3);
   if (error) return res.status(500).json({ error: error.message });
 
-  const inactive = (req.session.adminRole === 'pi' || !req.session.adminInstitution)
+  const inactive = isPI
     ? inactiveRaw
-    : inactiveRaw.filter(e => (e.participant?.institution || '') === req.session.adminInstitution);
+    : inactiveRaw.filter(e => (e.participant?.institution || '') === scopedInstitution);
 
   const results = [];
   for (const e of inactive) {
@@ -1025,8 +1048,13 @@ app.post('/api/admin/send-reminders', requireAdmin, async (req, res) => {
       results.push({ id: e.id, status: 'failed', email });
     }
   }
-  await logAdminAction(req, 'send_reminders', 'study', studyId, { daysInactive, count: inactive.length, results });
-  res.json({ total: inactive.length, results });
+  await logAdminAction(req, 'send_reminders', 'study', studyId, {
+    daysInactive,
+    scope: scopedInstitution || 'all-sites',
+    count: inactive.length,
+    results
+  });
+  res.json({ total: inactive.length, results, scope: scopedInstitution || 'all-sites' });
 });
 
 // List co-researchers
