@@ -382,9 +382,20 @@ function requirePI(req, res, next) {
   next();
 }
 
-function canAccessStudy(req, studyId) {
+async function getScopedStudies(req) {
+  if (req.session.adminRole === 'pi') return null; // null = no restriction
+  const { data } = await sb
+    .from('admin_users')
+    .select('scoped_studies')
+    .eq('id', req.session.adminId)
+    .single();
+  return (data?.scoped_studies || []).map(Number);
+}
+
+async function canAccessStudy(req, studyId) {
   if (req.session.adminRole === 'pi') return true;
-  return (req.session.adminStudies || []).map(Number).includes(Number(studyId));
+  const scoped = await getScopedStudies(req);
+  return (scoped || []).includes(Number(studyId));
 }
 
 async function getAdminPermissions(req) {
@@ -837,8 +848,8 @@ app.get('/api/study/:studyId/average_gain', async (req, res) => {
 
 app.get('/api/admin/studies', requireAdmin, async (req, res) => {
   let query = sb.from('studies').select('*').order('id');
-  if (req.session.adminRole !== 'pi') {
-    const scoped = (req.session.adminStudies || []).map(Number);
+  const scoped = await getScopedStudies(req);
+  if (scoped !== null) {
     if (!scoped.length) return res.json([]);
     query = query.in('id', scoped);
   }
@@ -850,7 +861,7 @@ app.get('/api/admin/studies', requireAdmin, async (req, res) => {
 app.post('/api/admin/control', requireAdmin, async (req, res) => {
   const { study_id, status, capacity } = req.body;
   if (!study_id) return res.status(400).json({ error: 'study_id required' });
-  if (!canAccessStudy(req, study_id)) return res.status(403).json({ error: 'Not authorised for this study' });
+  if (!(await canAccessStudy(req, study_id))) return res.status(403).json({ error: 'Not authorised for this study' });
 
   const perms = await getAdminPermissions(req);
   if (!perms.can_manage_portal) return res.status(403).json({ error: 'Portal management not enabled for this account' });
@@ -867,7 +878,7 @@ app.post('/api/admin/control', requireAdmin, async (req, res) => {
 app.get('/api/admin/status', requireAdmin, async (req, res) => {
   const studyId = req.query.study;
   if (!studyId) return res.status(400).json({ error: 'study query param required' });
-  if (!canAccessStudy(req, studyId)) return res.status(403).json({ error: 'Not authorised for this study' });
+  if (!(await canAccessStudy(req, studyId))) return res.status(403).json({ error: 'Not authorised for this study' });
 
   const { data: study } = await sb.from('studies').select('status, capacity, end_date').eq('id', studyId).single();
   if (!study) return res.status(404).json({ error: 'Study not found' });
@@ -879,7 +890,7 @@ app.get('/api/admin/status', requireAdmin, async (req, res) => {
 
 app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
   const { studyId } = req.params;
-  if (!canAccessStudy(req, studyId)) return res.status(403).json({ error: 'Not authorised for this study' });
+  if (!(await canAccessStudy(req, studyId))) return res.status(403).json({ error: 'Not authorised for this study' });
 
   const perms = await getAdminPermissions(req);
   if (!perms.can_export) return res.status(403).json({ error: 'Export not enabled for this account' });
@@ -933,7 +944,7 @@ app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
 app.post('/api/admin/send-reminders', requireAdmin, async (req, res) => {
   const { studyId, daysInactive = 3 } = req.body;
   if (!studyId) return res.status(400).json({ error: 'studyId required' });
-  if (!canAccessStudy(req, studyId)) return res.status(403).json({ error: 'Not authorised for this study' });
+  if (!(await canAccessStudy(req, studyId))) return res.status(403).json({ error: 'Not authorised for this study' });
 
   const perms = await getAdminPermissions(req);
   if (!perms.can_send_reminders) return res.status(403).json({ error: 'Reminders not enabled for this account' });
@@ -973,6 +984,61 @@ app.post('/api/admin/send-reminders', requireAdmin, async (req, res) => {
   }
   await logAdminAction(req, 'send_reminders', 'study', studyId, { daysInactive, count: inactive.length, results });
   res.json({ total: inactive.length, results });
+});
+
+// List co-researchers
+app.get('/api/admin/users', requirePI, async (req, res) => {
+  const { data, error } = await sb
+    .from('admin_users')
+    .select('id, email, name, institution, role, scoped_studies, is_active, last_login, can_export, can_manage_portal, can_send_reminders, can_view_participant')
+    .neq('role', 'pi')
+    .order('name');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// Update a co-researcher's scoped studies
+app.put('/api/admin/users/:id/studies', requirePI, async (req, res) => {
+  const { id } = req.params;
+  const { scoped_studies } = req.body;
+  if (!Array.isArray(scoped_studies)) {
+    return res.status(400).json({ error: 'scoped_studies must be an array of study IDs' });
+  }
+  const ids = scoped_studies.map(Number).filter(n => Number.isInteger(n) && n > 0);
+
+  if (ids.length > 0) {
+    const { data: studies, error: sErr } = await sb.from('studies').select('id').in('id', ids);
+    if (sErr) return res.status(500).json({ error: sErr.message });
+    const foundIds = new Set((studies || []).map(s => Number(s.id)));
+    const missing = ids.filter(x => !foundIds.has(x));
+    if (missing.length) return res.status(400).json({ error: `Unknown study IDs: ${missing.join(', ')}` });
+  }
+
+  const { data: target } = await sb.from('admin_users').select('role').eq('id', id).single();
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.role === 'pi') return res.status(400).json({ error: 'Cannot change PI scoping' });
+
+  const { error } = await sb.from('admin_users').update({ scoped_studies: ids }).eq('id', id);
+  if (error) return res.status(500).json({ error: error.message });
+  await logAdminAction(req, 'update_co_researcher_studies', 'admin_user', id, { scoped_studies: ids });
+  res.json({ success: true, scoped_studies: ids });
+});
+
+// Activate / deactivate a co-researcher
+app.put('/api/admin/users/:id/active', requirePI, async (req, res) => {
+  const { id } = req.params;
+  const { is_active } = req.body;
+  if (typeof is_active !== 'boolean') {
+    return res.status(400).json({ error: 'is_active must be true or false' });
+  }
+  const { data: target } = await sb.from('admin_users').select('role').eq('id', id).single();
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.role === 'pi') return res.status(400).json({ error: 'Cannot deactivate the PI account' });
+
+  const { error } = await sb.from('admin_users').update({ is_active }).eq('id', id);
+  if (error) return res.status(500).json({ error: error.message });
+  await logAdminAction(req, is_active ? 'activate_admin' : 'deactivate_admin', 'admin_user', id, {});
+  res.json({ success: true, is_active });
 });
 
 // ============================================================

@@ -2615,6 +2615,34 @@ function bindAdminLogin() {
   });
 }
 
+async function apiAdminUsers() {
+  const res = await fetch(`${API_BASE}/api/admin/users`, { credentials: 'include' });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function apiUpdateUserStudies(userId, scoped_studies) {
+  const res = await fetch(`${API_BASE}/api/admin/users/${userId}/studies`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ scoped_studies })
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function apiToggleUserActive(userId, is_active) {
+  const res = await fetch(`${API_BASE}/api/admin/users/${userId}/active`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ is_active })
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // ============================================================
 // DASHBOARD
 // ============================================================
@@ -2632,14 +2660,27 @@ function renderDashboard() {
     <div class="actions">
       <button class="btn btn-secondary" id="btnExportCSV">📊 Export CSV</button>
       <button class="btn btn-secondary" id="btnExportJSON">📥 Export JSON</button>
+      ${S.adminRole === 'pi' ? `<button class="btn btn-secondary" id="btnManageCoResearchers">👥 Manage co-researchers</button>` : ''}
       <button class="btn btn-secondary" id="btnClearLocalData">🗑 Clear local data</button>
       <button class="btn btn-primary" id="btnDashBack">← Back to portal</button>
     </div>
+    <div id="coResearcherPanel" style="display:none; margin-top:30px; border-top:2px solid var(--border); padding-top:20px;"></div>
   </div>`;
 }
 function bindDashboard() {
   let currentStudyId = null;
-  async function loadStudies() {
+    el('btnManageCoResearchers')?.addEventListener('click', async () => {
+    const panel = document.getElementById('coResearcherPanel');
+    if (!panel) return;
+    if (panel.style.display === 'block') {
+    panel.style.display = 'none';
+    return;
+    }
+    panel.style.display = 'block';
+    await renderCoResearcherPanel();
+    });
+ 
+ async function loadStudies() {
     const studies = await apiAdminFetchStudies();
     const select = document.getElementById('adminStudySelect');
     if (!select) return;
@@ -2693,6 +2734,104 @@ function bindDashboard() {
   el('btnClearLocalData')?.addEventListener('click', () => { if (confirm('Clear all local enrolment data? This cannot be undone. Data on the server remains unaffected.')) { const keys = Object.keys(localStorage).filter(k => k.startsWith('research_')); keys.forEach(k => localStorage.removeItem(k)); showSavedToast('Local data cleared'); } });
   el('btnDashBack')?.addEventListener('click', () => { S.isAdminMode = false; S.phase = 'hero'; go(); });
   loadStudies();
+}
+
+async function renderCoResearcherPanel() {
+  const panel = document.getElementById('coResearcherPanel');
+  if (!panel) return;
+  panel.innerHTML = '<p>Loading co-researchers...</p>';
+
+  try {
+    const [users, studies] = await Promise.all([apiAdminUsers(), apiAdminFetchStudies()]);
+
+    if (!users.length) {
+      panel.innerHTML = `<h3>👥 Co-researcher access</h3>
+        <p style="color:var(--muted);">No co-researchers yet. Create one with the <code>create-co-researcher.js</code> script.</p>`;
+      return;
+    }
+
+    let html = `<h3>👥 Co-researcher access</h3>
+      <p style="font-size:0.9rem;color:var(--muted);margin-bottom:16px;">
+        Tick a study to let this co-researcher manage it on their dashboard.
+        This controls <em>management</em> scope only — it does not affect which studies students can join.
+      </p>`;
+
+    users.forEach(user => {
+      const scoped = (user.scoped_studies || []).map(Number);
+      const isActive = user.is_active !== false;
+
+      html += `<div class="cr-card" style="border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px;background:var(--gray-50);${!isActive ? 'opacity:0.6;' : ''}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+          <div>
+            <div style="font-weight:700;">${escapeHtml(user.name)}</div>
+            <div style="font-size:0.85rem;color:var(--muted);">${escapeHtml(user.email)}</div>
+            <div style="font-size:0.85rem;color:var(--muted);">${escapeHtml(user.institution || '—')}</div>
+            <div style="font-size:0.8rem;color:var(--muted);margin-top:4px;">
+              ${isActive ? '✅ Active' : '⛔ Inactive'} · Last login: ${user.last_login ? new Date(user.last_login).toLocaleDateString() : 'Never'}
+            </div>
+          </div>
+          <button class="btn btn-secondary btn-sm" data-toggle-active="${user.id}" data-active="${isActive}">
+            ${isActive ? '⛔ Deactivate' : '✅ Activate'}
+          </button>
+        </div>
+        <div style="margin-top:12px;">
+          <div style="font-weight:600;font-size:0.9rem;margin-bottom:8px;">Scoped studies:</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;">
+            ${studies.map(study => {
+              const checked = scoped.includes(Number(study.id));
+              return `<label style="display:flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid var(--border);border-radius:20px;background:var(--paper-raised);cursor:pointer;font-size:0.85rem;">
+                <input type="checkbox" class="cr-study-cb" data-user-id="${user.id}" data-study-id="${study.id}" ${checked ? 'checked' : ''}>
+                ${escapeHtml(study.title_en)}
+              </label>`;
+            }).join('')}
+          </div>
+        </div>
+        <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+          <button class="btn btn-primary btn-sm" data-save-user="${user.id}">💾 Save study access</button>
+          <span data-status-for="${user.id}" style="font-size:0.85rem;"></span>
+        </div>
+      </div>`;
+    });
+
+    panel.innerHTML = html;
+
+    panel.querySelectorAll('[data-save-user]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const userId = btn.dataset.saveUser;
+        const status = panel.querySelector(`[data-status-for="${userId}"]`);
+        const ids = [];
+        panel.querySelectorAll(`.cr-study-cb[data-user-id="${userId}"]`).forEach(cb => {
+          if (cb.checked) ids.push(parseInt(cb.dataset.studyId));
+        });
+        if (status) { status.textContent = 'Saving...'; status.style.color = 'var(--text)'; }
+        try {
+          await apiUpdateUserStudies(userId, ids);
+          if (status) { status.textContent = '✅ Saved'; status.style.color = 'var(--success)'; }
+          showSavedToast('Study access updated');
+        } catch (e) {
+          if (status) { status.textContent = '❌ ' + e.message; status.style.color = 'var(--danger)'; }
+        }
+      });
+    });
+
+    panel.querySelectorAll('[data-toggle-active]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const userId = btn.dataset.toggleActive;
+        const currentlyActive = btn.dataset.active === 'true';
+        const newState = !currentlyActive;
+        if (!confirm(`${newState ? 'Activate' : 'Deactivate'} this account? ${newState ? '' : 'They will be unable to log in.'}`)) return;
+        try {
+          await apiToggleUserActive(userId, newState);
+          showSavedToast(newState ? 'Account activated' : 'Account deactivated');
+          await renderCoResearcherPanel();
+        } catch (e) {
+          alert('Error: ' + e.message);
+        }
+      });
+    });
+  } catch (e) {
+    panel.innerHTML = `<p style="color:var(--danger);">Error loading co-researchers: ${e.message}</p>`;
+  }
 }
 
 // ============================================================
