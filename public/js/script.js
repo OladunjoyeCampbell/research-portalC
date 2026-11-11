@@ -61,6 +61,7 @@ let S = {
   adminName: '',
   adminRole: '',
   adminInstitution: '',
+  adminPermissions: {},
   dropdownCache: {},
   completedPhases: {
     survey: false,
@@ -2600,6 +2601,7 @@ function bindAdminLogin() {
       S.isAdminMode = true;
       S.adminName = res.name || '';
       S.adminInstitution = res.institution || '';
+	  S.adminPermissions = res.permissions || {};
       S.adminRole = res.role || 'co_researcher';
       S.phase = 'dashboard';
       window.history.replaceState({}, '', window.location.pathname);
@@ -2647,6 +2649,7 @@ async function apiToggleUserActive(userId, is_active) {
 // DASHBOARD
 // ============================================================
 function renderDashboard() {
+  const canExport = S.adminRole === 'pi' || S.adminPermissions?.can_export === true;
   return `${topbarHTML()}<div class="main-card">
     <h2>📊 Researcher Dashboard</h2>
     <p>Select a study to manage.</p>
@@ -2658,8 +2661,8 @@ function renderDashboard() {
     <div id="portalMgmtPanel" class="portal-status-placeholder" style="margin-bottom:20px">Loading...</div>
     <div class="dash-grid" id="statsGrid" style="margin-bottom:20px">...</div>
     <div class="actions">
-      <button class="btn btn-secondary" id="btnExportCSV">📊 Export CSV</button>
-      <button class="btn btn-secondary" id="btnExportJSON">📥 Export JSON</button>
+      ${canExport ? `<button class="btn btn-secondary" id="btnExportCSV">📊 Export CSV</button>
+      <button class="btn btn-secondary" id="btnExportJSON">📥 Export JSON</button>` : ''}
       ${S.adminRole === 'pi' ? `<button class="btn btn-secondary" id="btnManageCoResearchers">👥 Manage co-researchers</button>` : ''}
       <button class="btn btn-secondary" id="btnClearLocalData">🗑 Clear local data</button>
       <button class="btn btn-primary" id="btnDashBack">← Back to portal</button>
@@ -2696,21 +2699,87 @@ function bindDashboard() {
       if (currentStudyId) await refreshPortalStatus(currentStudyId);
     });
   }
-  async function refreshPortalStatus(studyId) {
-    if (!studyId) return;
-    try {
-      const status = await apiPortalStatus(studyId);
-      if (!status) return;
-      const enrolled = status.enrolled || 0, inProgress = status.inProgress || 0, completed = status.completed || 0, capacity = status.capacity || 100, spacesLeft = Math.max(0, capacity - enrolled);
-      const grid = document.getElementById('statsGrid');
-      if (grid) grid.innerHTML = `<div class="stat-card"><div class="stat-num">${enrolled}</div><div class="stat-label">Enrolled</div></div><div class="stat-card"><div class="stat-num">${inProgress}</div><div class="stat-label">In progress</div></div><div class="stat-card"><div class="stat-num">${completed}</div><div class="stat-label">Completed</div></div><div class="stat-card"><div class="stat-num">${spacesLeft}</div><div class="stat-label">Spaces left</div></div>`;
-      const statusOpen = status.status === 'open';
-      const mgmtHtml = `<div class="portal-status ${statusOpen ? 'ps-open' : 'ps-closed'}"><span class="status-badge ${statusOpen ? 'sb-open' : 'sb-closed'}">${statusOpen ? 'OPEN' : 'CLOSED'}</span><span style="font-weight:700">${enrolled}/${capacity} enrolled</span><div class="pipeline-bar" style="flex:1;min-width:120px"><div class="pb-done" style="width:${capacity>0?Math.round((completed/capacity)*100):0}%"></div><div class="pb-prog" style="width:${capacity>0?Math.round(((enrolled-completed)/capacity)*100):0}%"></div><div class="pb-idle" style="flex:1"></div></div><span style="font-size:.82rem">${Math.round((enrolled/capacity)*100)}% capacity</span></div><div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0"><button class="btn btn-success btn-sm" id="btnPortalOpen" ${statusOpen ? 'disabled' : ''}>✅ Open enrolment</button><button class="btn btn-warn btn-sm" id="btnPortalClose" ${!statusOpen ? 'disabled' : ''}>🔒 Close enrolment</button><label style="font-size:.88rem;font-weight:700;display:flex;align-items:center;gap:6px">Capacity: <input id="inpCap" type="number" min="1" max="500" value="${capacity}" style="width:80px;padding:6px;border-radius:10px;border:1.5px solid var(--border)"><button class="btn btn-secondary btn-sm" id="btnSetCap">Set</button></label><button class="btn btn-warn btn-sm" id="btnSendReminders" style="background:#d97706;">📧 Send email reminders (inactive >3 days)</button><span id="reminderStatus" style="margin-left:12px;font-size:0.85rem;"></span></div>`;
-      const panel = document.getElementById('portalMgmtPanel');
-      if (panel) panel.innerHTML = mgmtHtml;
-      document.getElementById('btnPortalOpen')?.addEventListener('click', async () => { await apiPortalControl(currentStudyId, 'open', undefined); refreshPortalStatus(currentStudyId); });
-      document.getElementById('btnPortalClose')?.addEventListener('click', async () => { await apiPortalControl(currentStudyId, 'closed', undefined); refreshPortalStatus(currentStudyId); });
-      document.getElementById('btnSetCap')?.addEventListener('click', async () => { const newCap = parseInt(document.getElementById('inpCap')?.value || '100'); if (newCap > 0) await apiPortalControl(currentStudyId, undefined, newCap); refreshPortalStatus(currentStudyId); });
+async function refreshPortalStatus(studyId) {
+  if (!studyId) return;
+  try {
+    const status = await apiPortalStatus(studyId);
+    if (!status) return;
+
+    const enrolled   = status.enrolled || 0;
+    const inProgress = status.inProgress || 0;
+    const completed  = status.completed || 0;
+    const capacity   = status.capacity || 100;
+    const spacesLeft = Math.max(0, capacity - enrolled);
+
+    const canManage = S.adminRole === 'pi' || S.adminPermissions?.can_manage_portal === true;
+    const canExport = S.adminRole === 'pi' || S.adminPermissions?.can_export === true;
+    const canRemind = S.adminRole === 'pi' || S.adminPermissions?.can_send_reminders === true;
+    const scopeLabel = status.scope && status.scope !== 'all-sites'
+      ? ` · ${status.scope}`
+      : '';
+
+    const grid = document.getElementById('statsGrid');
+    if (grid) grid.innerHTML = `
+      <div class="stat-card"><div class="stat-num">${enrolled}</div><div class="stat-label">Enrolled${scopeLabel}</div></div>
+      <div class="stat-card"><div class="stat-num">${inProgress}</div><div class="stat-label">In progress</div></div>
+      <div class="stat-card"><div class="stat-num">${completed}</div><div class="stat-label">Completed</div></div>
+      <div class="stat-card"><div class="stat-num">${spacesLeft}</div><div class="stat-label">Spaces left</div></div>`;
+
+    const statusOpen = status.status === 'open';
+    const headerHtml = `<div class="portal-status ${statusOpen ? 'ps-open' : 'ps-closed'}">
+      <span class="status-badge ${statusOpen ? 'sb-open' : 'sb-closed'}">${statusOpen ? 'OPEN' : 'CLOSED'}</span>
+      <span style="font-weight:700">${enrolled}/${capacity} enrolled${scopeLabel}</span>
+      <div class="pipeline-bar" style="flex:1;min-width:120px">
+        <div class="pb-done" style="width:${capacity>0?Math.round((completed/capacity)*100):0}%"></div>
+        <div class="pb-prog" style="width:${capacity>0?Math.round(((enrolled-completed)/capacity)*100):0}%"></div>
+        <div class="pb-idle" style="flex:1"></div>
+      </div>
+    </div>`;
+
+    let controlsHtml = '';
+    if (canManage) {
+      controlsHtml = `<div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0">
+        <button class="btn btn-success btn-sm" id="btnPortalOpen" ${statusOpen ? 'disabled' : ''}>✅ Open enrolment</button>
+        <button class="btn btn-warn btn-sm" id="btnPortalClose" ${!statusOpen ? 'disabled' : ''}>🔒 Close enrolment</button>
+        <label style="font-size:.88rem;font-weight:700;display:flex;align-items:center;gap:6px">
+          Capacity: <input id="inpCap" type="number" min="1" max="500" value="${capacity}" style="width:80px;padding:6px;border-radius:10px;border:1.5px solid var(--border)">
+          <button class="btn btn-secondary btn-sm" id="btnSetCap">Set</button>
+        </label>
+      </div>`;
+    } else {
+      controlsHtml = `<div style="margin:10px 0;font-size:0.88rem;color:var(--muted);">
+        ℹ️ Portal controls (open/close, capacity) are managed by the PI.
+      </div>`;
+    }
+
+    let remindersHtml = '';
+    if (canRemind) {
+      remindersHtml = `<div style="display:flex;align-items:center;gap:12px;margin:10px 0">
+        <button class="btn btn-warn btn-sm" id="btnSendReminders" style="background:#d97706;">📧 Send email reminders (inactive >3 days)</button>
+        <span id="reminderStatus" style="font-size:0.85rem;"></span>
+      </div>`;
+    }
+
+    const panel = document.getElementById('portalMgmtPanel');
+    if (panel) panel.innerHTML = headerHtml + controlsHtml + remindersHtml;
+
+    if (canManage) {
+      document.getElementById('btnPortalOpen')?.addEventListener('click', async () => {
+        await apiPortalControl(currentStudyId, 'open', undefined);
+        refreshPortalStatus(currentStudyId);
+      });
+      document.getElementById('btnPortalClose')?.addEventListener('click', async () => {
+        await apiPortalControl(currentStudyId, 'closed', undefined);
+        refreshPortalStatus(currentStudyId);
+      });
+      document.getElementById('btnSetCap')?.addEventListener('click', async () => {
+        const newCap = parseInt(document.getElementById('inpCap')?.value || '100');
+        if (newCap > 0) await apiPortalControl(currentStudyId, undefined, newCap);
+        refreshPortalStatus(currentStudyId);
+      });
+    }
+
+    if (canRemind) {
       const reminderBtn = document.getElementById('btnSendReminders');
       const reminderSpan = document.getElementById('reminderStatus');
       if (reminderBtn) {
@@ -2720,20 +2789,18 @@ function bindDashboard() {
             const res = await apiSendReminders(currentStudyId, 3);
             if (reminderSpan) reminderSpan.textContent = `Sent ${res.results.filter(r=>r.status==='sent').length} reminders (${res.total} eligible).`;
             showSavedToast(`Reminders sent for study ${currentStudyId}`);
-          } catch (err) { if (reminderSpan) reminderSpan.textContent = 'Error sending.'; console.error(err); }
+          } catch (err) {
+            if (reminderSpan) reminderSpan.textContent = 'Error sending.';
+            console.error(err);
+          }
         };
       }
-    } catch (e) {
-      console.warn('Failed to load portal status', e);
-      const panel = document.getElementById('portalMgmtPanel');
-      if (panel) panel.innerHTML = '<div class="example-box">Could not load portal status. Make sure you are logged in as admin.</div>';
     }
+  } catch (e) {
+    console.warn('Failed to load portal status', e);
+    const panel = document.getElementById('portalMgmtPanel');
+    if (panel) panel.innerHTML = '<div class="example-box">Could not load portal status. Make sure you are logged in as admin.</div>';
   }
-  el('btnExportCSV')?.addEventListener('click', async () => { if (!currentStudyId) { alert('Please select a study first'); return; } try { const csv = await apiExportCSV(currentStudyId); const blob = new Blob([csv], {type: 'text/csv'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `study_${currentStudyId}_export.csv`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); showSavedToast('CSV exported'); } catch(e) { alert('Export failed: ' + e.message); } });
-  el('btnExportJSON')?.addEventListener('click', async () => { if (!currentStudyId) { alert('Please select a study first'); return; } try { const jsonData = await apiExportJSON(currentStudyId); const blob = new Blob([JSON.stringify(jsonData, null, 2)], {type: 'application/json'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `study_${currentStudyId}_export.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); showSavedToast('JSON exported'); } catch(e) { alert('Export failed: ' + e.message); } });
-  el('btnClearLocalData')?.addEventListener('click', () => { if (confirm('Clear all local enrolment data? This cannot be undone. Data on the server remains unaffected.')) { const keys = Object.keys(localStorage).filter(k => k.startsWith('research_')); keys.forEach(k => localStorage.removeItem(k)); showSavedToast('Local data cleared'); } });
-  el('btnDashBack')?.addEventListener('click', () => { S.isAdminMode = false; S.phase = 'hero'; go(); });
-  loadStudies();
 }
 
 async function renderCoResearcherPanel() {
