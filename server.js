@@ -468,11 +468,18 @@ app.post('/api/admin/login', async (req, res) => {
 
   await sb.from('admin_users').update({ last_login: new Date() }).eq('id', admin.id);
 
+  const isPI = admin.role === 'pi';
   res.json({
     success: true,
     name: admin.name,
     role: admin.role,
-    institution: admin.institution
+    institution: admin.institution,
+    permissions: {
+      can_export:           isPI ? true : admin.can_export === true,
+      can_manage_portal:    isPI ? true : admin.can_manage_portal === true,
+      can_send_reminders:   isPI ? true : admin.can_send_reminders === true,
+      can_view_participant: isPI ? true : admin.can_view_participant === true
+    }
   });
 });
 
@@ -880,12 +887,48 @@ app.get('/api/admin/status', requireAdmin, async (req, res) => {
   if (!studyId) return res.status(400).json({ error: 'study query param required' });
   if (!(await canAccessStudy(req, studyId))) return res.status(403).json({ error: 'Not authorised for this study' });
 
-  const { data: study } = await sb.from('studies').select('status, capacity, end_date').eq('id', studyId).single();
+  const { data: study } = await sb
+    .from('studies')
+    .select('status, capacity, end_date')
+    .eq('id', studyId)
+    .single();
   if (!study) return res.status(404).json({ error: 'Study not found' });
-  const { count: enrolled } = await sb.from('enrolments').select('*', { count: 'exact', head: true }).eq('study_id', studyId);
-  const { count: completed } = await sb.from('enrolments').select('*', { count: 'exact', head: true }).eq('study_id', studyId).eq('status', 'completed');
-  const { count: inProgress } = await sb.from('enrolments').select('*', { count: 'exact', head: true }).eq('study_id', studyId).eq('status', 'in_progress');
-  res.json({ status: study.status, capacity: study.capacity, end_date: study.end_date, enrolled, completed, inProgress });
+
+  const isPI = req.session.adminRole === 'pi';
+  const scopedInstitution = isPI ? null : (req.session.adminInstitution || null);
+
+  const { data: rows, error } = await sb
+    .from('enrolments')
+    .select('status, participant:participant_id(institution)')
+    .eq('study_id', studyId);
+  if (error) return res.status(500).json({ error: error.message });
+
+  let filtered;
+  if (isPI) {
+    filtered = rows;
+  } else if (scopedInstitution) {
+    filtered = rows.filter(r => (r.participant?.institution || '') === scopedInstitution);
+  } else {
+    // Co-researcher without an institution — fail closed, do not leak global counts
+    filtered = [];
+  }
+
+  const enrolled   = filtered.length;
+  const completed  = filtered.filter(r => r.status === 'completed').length;
+  const inProgress = filtered.filter(r => r.status === 'in_progress').length;
+
+  const perms = await getAdminPermissions(req);
+
+  res.json({
+    status: study.status,
+    capacity: study.capacity,
+    end_date: study.end_date,
+    enrolled,
+    completed,
+    inProgress,
+    scope: scopedInstitution || 'all-sites',
+    can_manage: isPI || perms.can_manage_portal === true
+  });
 });
 
 app.get('/api/admin/export/study/:studyId', requireAdmin, async (req, res) => {
