@@ -1,6 +1,9 @@
 // scripts/create-co-researcher.js
 // Usage: node scripts/create-co-researcher.js \
 //   <email> <name> <institution> <studyKey1,studyKey2> <password> [can_export:true|false]
+//
+// Permissions are set explicitly (not via schema defaults) so an account cannot
+// accidentally inherit PI-level portal control or export access.
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
@@ -23,7 +26,9 @@ if (!email || !name || !institution || !studyKeys || !password) {
 const can_export = (canExportArg || '').toLowerCase() === 'true';
 
 (async () => {
+  // ─────────────────────────────────────────────────────────────
   // 1. Resolve study keys -> ids
+  // ─────────────────────────────────────────────────────────────
   const keys = studyKeys.split(',').map(k => k.trim()).filter(Boolean);
   const { data: studies, error: sErr } = await sb
     .from('studies')
@@ -42,7 +47,30 @@ const can_export = (canExportArg || '').toLowerCase() === 'true';
 
   const scoped_ids = studies.map(s => s.id);
 
-  // 2. Refuse to overwrite an existing account silently
+  // ─────────────────────────────────────────────────────────────
+  // 2. Confirm institution matches dropdown_options exactly
+  //    (a typo here would silently scope the account to nothing)
+  // ─────────────────────────────────────────────────────────────
+  const { data: instRow, error: instErr } = await sb
+    .from('dropdown_options')
+    .select('value')
+    .eq('category', 'institution')
+    .eq('active', true)
+    .eq('value', institution)
+    .maybeSingle();
+
+  if (instErr) { console.error('Failed to check institution:', instErr.message); process.exit(1); }
+  if (!instRow) {
+    console.error('❌ Institution not found in dropdown_options (category=institution, active=true):');
+    console.error(`   "${institution}"`);
+    console.error('   Retrieve the exact label with:');
+    console.error("   SELECT value FROM dropdown_options WHERE category='institution' AND active=true ORDER BY display_order;");
+    process.exit(1);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 3. Refuse to overwrite an existing account silently
+  // ─────────────────────────────────────────────────────────────
   const { data: existing } = await sb
     .from('admin_users')
     .select('id, role')
@@ -56,7 +84,9 @@ const can_export = (canExportArg || '').toLowerCase() === 'true';
     process.exit(1);
   }
 
-  // 3. Hash password and insert
+  // ─────────────────────────────────────────────────────────────
+  // 4. Hash password and insert with EXPLICIT permissions
+  // ─────────────────────────────────────────────────────────────
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
 
@@ -68,7 +98,11 @@ const can_export = (canExportArg || '').toLowerCase() === 'true';
       institution,
       role: 'co_researcher',
       scoped_studies: scoped_ids,
-      can_export,
+      can_export,                     // as passed on CLI, default false
+      can_manage_portal: false,       // study-wide controls are PI-only
+      can_send_reminders: true,       // co-researcher may remind their own students
+      can_view_participant: false,    // no row-level answer access without PI grant
+      is_active: true,
       password_hash: `${salt}:${hash}`
     })
     .select()
@@ -81,8 +115,13 @@ const can_export = (canExportArg || '').toLowerCase() === 'true';
   console.log('   Name:         ', data.name);
   console.log('   Institution:  ', data.institution);
   console.log('   Scoped to:    ', studies.map(s => s.study_key).join(', '));
-  console.log('   can_export:   ', data.can_export, can_export ? '' : '(grant per account when analysis is needed)');
-  console.log('   can_manage_portal:', data.can_manage_portal);
-  console.log('   can_send_reminders:', data.can_send_reminders);
-  console.log('   can_view_participant:', data.can_view_participant);
+  console.log('   Permissions:');
+  console.log('     can_export:           ', data.can_export, can_export ? '' : '(grant per account when analysis is needed)');
+  console.log('     can_manage_portal:    ', data.can_manage_portal, '(open/close/capacity are PI-only)');
+  console.log('     can_send_reminders:   ', data.can_send_reminders, '(scoped to own institution)');
+  console.log('     can_view_participant: ', data.can_view_participant, '(no row-level answer access)');
+  console.log('     is_active:            ', data.is_active);
+  console.log('');
+  console.log('   Share the password via a channel she already uses. Ask her to click');
+  console.log('   the 🔑 Password button on first login and change it.');
 })();
