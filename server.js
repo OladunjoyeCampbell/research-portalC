@@ -483,6 +483,55 @@ app.post('/api/admin/login', async (req, res) => {
   });
 });
 
+app.post('/api/admin/change-password', requireAdmin, async (req, res) => {
+  const { current_password, new_password } = req.body;
+
+  if (!current_password || !new_password) {
+    return res.status(400).json({ error: 'Current and new password are both required' });
+  }
+  if (typeof new_password !== 'string' || new_password.length < 8) {
+    return res.status(400).json({ error: 'New password must be at least 8 characters' });
+  }
+  if (new_password === current_password) {
+    return res.status(400).json({ error: 'New password must differ from current password' });
+  }
+
+  const { data: admin, error } = await sb
+    .from('admin_users')
+    .select('id, password_hash')
+    .eq('id', req.session.adminId)
+    .single();
+  if (error || !admin) return res.status(404).json({ error: 'Account not found' });
+
+  if (!verifyPassword(current_password, admin.password_hash)) {
+    await logAdminAction(req, 'password_change_failed', 'admin_user', admin.id, { reason: 'wrong_current_password' });
+    return res.status(401).json({ error: 'Current password is incorrect' });
+  }
+
+  const new_hash = hashPassword(new_password);
+  const { error: updateErr } = await sb
+    .from('admin_users')
+    .update({ password_hash: new_hash })
+    .eq('id', admin.id);
+  if (updateErr) return res.status(500).json({ error: updateErr.message });
+
+  // Keep the current tab logged in, kill every other session for this user
+  try {
+    const currentSid = req.sessionID;
+    if (currentSid) {
+      await sessionPool.query(
+        `DELETE FROM session WHERE sess->>'adminId' = $1 AND sid != $2`,
+        [String(admin.id), currentSid]
+      );
+    }
+  } catch (err) {
+    console.warn('Failed to clear other sessions after password change:', err);
+  }
+
+  await logAdminAction(req, 'password_changed', 'admin_user', admin.id, {});
+  res.json({ success: true });
+});
+
 app.post('/api/admin/logout', (req, res) => {
   req.session.destroy();
   res.json({ success: true });
@@ -1110,6 +1159,42 @@ app.put('/api/admin/users/:id/active', requirePI, async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   await logAdminAction(req, is_active ? 'activate_admin' : 'deactivate_admin', 'admin_user', id, {});
   res.json({ success: true, is_active });
+});
+
+// Revoke all active sessions for a co-researcher (immediate logout, PI only)
+app.post('/api/admin/users/:id/revoke-sessions', requirePI, async (req, res) => {
+  const userId = parseInt(req.params.id);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return res.status(400).json({ error: 'Invalid user ID' });
+  }
+
+  const { data: target } = await sb
+    .from('admin_users')
+    .select('id, role, email')
+    .eq('id', userId)
+    .single();
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.role === 'pi') return res.status(400).json({ error: 'Cannot revoke PI sessions' });
+
+  try {
+    // connect-pg-simple stores session data in the `sess` json column.
+    // Filtering on sess->>'adminId' targets exactly this user's sessions.
+    const result = await sessionPool.query(
+      `DELETE FROM session WHERE sess->>'adminId' = $1`,
+      [String(userId)]
+    );
+    const revoked = result.rowCount || 0;
+
+    await logAdminAction(req, 'revoke_admin_sessions', 'admin_user', userId, {
+      target_email: target.email,
+      sessions_revoked: revoked
+    });
+
+    res.json({ success: true, revoked });
+  } catch (err) {
+    console.error('Failed to revoke sessions:', err);
+    res.status(500).json({ error: 'Failed to revoke sessions' });
+  }
 });
 
 // ============================================================

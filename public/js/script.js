@@ -495,7 +495,8 @@ function topbarHTML() {
       </div>
       <div class="topbar-right">
         ${S.isAdminMode && S.adminName
-          ? `<span class="pill pill-gray" style="pointer-events:none;">👤 ${escapeHtml(S.adminName)}${S.adminInstitution ? ' · ' + escapeHtml(S.adminInstitution) : ''}</span>`
+          ? `<span class="pill pill-gray" style="pointer-events:none;">👤 ${escapeHtml(S.adminName)}${S.adminInstitution ? ' · ' + escapeHtml(S.adminInstitution) : ''}</span>
+             <button class="pill pill-gray" id="btnChangePassword">🔑 Password</button>`
           : ''}
         <button class="pill" id="btnTheme">${themeIcon} ${themeText}</button>
         <button class="pill ${S.audioOn?'pill-green':'pill-gray'}" id="btnAudio">${S.audioOn?'🔊':'🔇'} Audio</button>
@@ -510,7 +511,7 @@ function topbarHTML() {
 }
 
 function phaseStripHTML() {
-  const hidePhases = ['hero','studySelect','adminLogin','dashboard','register','resume','certificates'];
+  const hidePhases = ['hero','studySelect','adminLogin','dashboard','register','resume','certificates','changePassword'];
   if (hidePhases.includes(S.phase)) return '';
   let phases = S.studyConfig?.phases;
   if (!phases || phases.length === 0) {
@@ -2601,7 +2602,7 @@ function bindAdminLogin() {
       S.isAdminMode = true;
       S.adminName = res.name || '';
       S.adminInstitution = res.institution || '';
-	  S.adminPermissions = res.permissions || {};
+      S.adminPermissions = res.permissions || {};
       S.adminRole = res.role || 'co_researcher';
       S.phase = 'dashboard';
       window.history.replaceState({}, '', window.location.pathname);
@@ -2614,6 +2615,77 @@ function bindAdminLogin() {
     window.history.replaceState({}, '', window.location.pathname);
     S.phase = 'hero';
     go();
+  });
+}
+
+// ============================================================
+// ADMIN: CHANGE PASSWORD
+// ============================================================
+function renderChangePassword() {
+  return `${topbarHTML()}<div class="main-card">
+    <h2>🔑 Change your password</h2>
+    <p>Choose a strong password of at least 8 characters. You will stay logged in on this tab, but every other active session for your account will be logged out.</p>
+    <div class="input-row" style="max-width:360px">
+      <div><label>Current password</label><input type="password" id="cpCurrent" autocomplete="current-password" /></div>
+    </div>
+    <div class="input-row" style="max-width:360px">
+      <div><label>New password</label><input type="password" id="cpNew" autocomplete="new-password" /></div>
+    </div>
+    <div class="input-row" style="max-width:360px">
+      <div><label>Confirm new password</label><input type="password" id="cpConfirm" autocomplete="new-password" /></div>
+    </div>
+    <p id="cpErr" style="color:var(--danger);text-align:center"></p>
+    <p id="cpOk" style="color:var(--success);text-align:center"></p>
+    <div class="actions">
+      <button class="btn btn-secondary" id="btnCpCancel">Cancel</button>
+      <button class="btn btn-primary" id="btnCpSubmit">Change password</button>
+    </div>
+  </div>`;
+}
+
+function bindChangePassword() {
+  document.getElementById('btnCpCancel')?.addEventListener('click', () => {
+    S.phase = S.isAdminMode ? 'dashboard' : 'hero';
+    go();
+  });
+
+  document.getElementById('btnCpSubmit')?.addEventListener('click', async () => {
+    const current = document.getElementById('cpCurrent')?.value || '';
+    const next    = document.getElementById('cpNew')?.value || '';
+    const confirm = document.getElementById('cpConfirm')?.value || '';
+    const errEl   = document.getElementById('cpErr');
+    const okEl    = document.getElementById('cpOk');
+
+    if (errEl) errEl.textContent = '';
+    if (okEl)  okEl.textContent  = '';
+
+    if (!current || !next || !confirm) {
+      if (errEl) errEl.textContent = 'Please fill in all three fields.';
+      return;
+    }
+    if (next.length < 8) {
+      if (errEl) errEl.textContent = 'New password must be at least 8 characters.';
+      return;
+    }
+    if (next !== confirm) {
+      if (errEl) errEl.textContent = 'New password and confirmation do not match.';
+      return;
+    }
+    if (next === current) {
+      if (errEl) errEl.textContent = 'New password must differ from current password.';
+      return;
+    }
+
+    const btn = document.getElementById('btnCpSubmit');
+    if (btn) { btn.disabled = true; btn.textContent = 'Changing...'; }
+    try {
+      await apiChangePassword(current, next);
+      if (okEl) okEl.textContent = '✅ Password changed. Returning to dashboard...';
+      setTimeout(() => { S.phase = S.isAdminMode ? 'dashboard' : 'hero'; go(); }, 1500);
+    } catch (e) {
+      if (errEl) errEl.textContent = e.message || 'Failed to change password.';
+      if (btn) { btn.disabled = false; btn.textContent = 'Change password'; }
+    }
   });
 }
 
@@ -2642,6 +2714,34 @@ async function apiToggleUserActive(userId, is_active) {
     body: JSON.stringify({ is_active })
   });
   if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function apiRevokeUserSessions(userId) {
+  const res = await fetch(`${API_BASE}/api/admin/users/${userId}/revoke-sessions`, {
+    method: 'POST',
+    credentials: 'include'
+  });
+  if (!res.ok) {
+    let msg = 'Failed to revoke sessions';
+    try { const body = await res.json(); if (body.error) msg = body.error; } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+async function apiChangePassword(current_password, new_password) {
+  const res = await fetch(`${API_BASE}/api/admin/change-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ current_password, new_password })
+  });
+  if (!res.ok) {
+    let msg = 'Password change failed';
+    try { const body = await res.json(); if (body.error) msg = body.error; } catch {}
+    throw new Error(msg);
+  }
   return res.json();
 }
 
@@ -2800,7 +2900,6 @@ function bindDashboard() {
     }
   }
 
-  // ---- these four were deleted by the last edit; they MUST be restored ----
   el('btnExportCSV')?.addEventListener('click', async () => {
     if (!currentStudyId) { alert('Please select a study first'); return; }
     try {
@@ -2840,7 +2939,7 @@ function bindDashboard() {
     go();
   });
 
-  loadStudies();   // <-- this was also deleted
+  loadStudies();
 }
 
 async function renderCoResearcherPanel() {
@@ -2893,8 +2992,9 @@ async function renderCoResearcherPanel() {
             }).join('')}
           </div>
         </div>
-        <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+        <div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" data-save-user="${user.id}">💾 Save study access</button>
+          <button class="btn btn-sm" data-revoke-sessions="${user.id}" style="background:#dc2626;color:white;">🔒 Revoke sessions</button>
           <span data-status-for="${user.id}" style="font-size:0.85rem;"></span>
         </div>
       </div>`;
@@ -2933,6 +3033,25 @@ async function renderCoResearcherPanel() {
           await renderCoResearcherPanel();
         } catch (e) {
           alert('Error: ' + e.message);
+        }
+      });
+    });
+
+    panel.querySelectorAll('[data-revoke-sessions]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const userId = btn.dataset.revokeSessions;
+        if (!confirm('Revoke all active sessions for this user?\n\nThey will be logged out on their next request. Their account stays active — they can log in again with their existing password.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Revoking...';
+        try {
+          const res = await apiRevokeUserSessions(userId);
+          showSavedToast(`Revoked ${res.revoked} session(s)`);
+          btn.textContent = `✅ ${res.revoked} revoked`;
+          setTimeout(() => { btn.disabled = false; btn.textContent = '🔒 Revoke sessions'; }, 3000);
+        } catch (e) {
+          alert('Error: ' + e.message);
+          btn.disabled = false;
+          btn.textContent = '🔒 Revoke sessions';
         }
       });
     });
@@ -3347,6 +3466,7 @@ async function go() {
     case 'dashboard': html = renderDashboard(); break;
     case 'resume': html = renderResume(); break;
     case 'certificates': html = renderCertificates(); break;
+    case 'changePassword': html = renderChangePassword(); break;
     default: html = '<div>Error</div>';
   }
   app.innerHTML = html;
@@ -3373,6 +3493,7 @@ async function go() {
 
   el('btnTheme')?.addEventListener('click', () => { toggleTheme(); });
   el('btnAudio')?.addEventListener('click', () => { S.audioOn = !S.audioOn; go(); });
+  el('btnChangePassword')?.addEventListener('click', () => { S.phase = 'changePassword'; go(); });
   el('btnOtherStudies')?.addEventListener('click', async () => {
     if (S.participantCode) S.myEnrolments = await apiGetMyEnrolments(S.participantCode);
     S.availableStudies = await apiFetchStudies();
@@ -3429,6 +3550,7 @@ async function go() {
     case 'dashboard': bindDashboard(); break;
     case 'resume': bindResume(); break;
     case 'certificates': bindCertificates(); break;
+    case 'changePassword': bindChangePassword(); break;
     default: break;
   }
 }
