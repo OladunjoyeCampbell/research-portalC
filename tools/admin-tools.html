@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Tools — Research Portal</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; padding: 16px; max-width: 640px; margin: auto; line-height: 1.5; color: #1f2937; background: #f9fafb; }
+    h1 { font-size: 1.4rem; margin: 0 0 4px; }
+    h2 { font-size: 1.1rem; margin-top: 0; margin-bottom: 12px; }
+    .lead { color: #6b7280; font-size: 13px; margin: 0 0 16px; }
+    .warn { background: #fef3c7; padding: 12px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; border-left: 4px solid #f59e0b; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+    .tabs button { flex: 1 1 auto; padding: 10px 12px; background: #fff; border: 1px solid #d1d5db; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; }
+    .tabs button.active { background: #1e3a8a; color: #fff; border-color: #1e3a8a; }
+    .panel { display: none; background: #fff; padding: 16px; border-radius: 12px; border: 1px solid #e5e7eb; }
+    .panel.active { display: block; }
+    label { display: block; font-weight: 600; font-size: 13px; margin-top: 12px; margin-bottom: 4px; }
+    input, select, textarea, button { font: inherit; }
+    input[type=text], input[type=email], input[type=password], input[type=number] {
+      width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 15px;
+    }
+    textarea { width: 100%; font-family: ui-monospace, 'SF Mono', monospace; font-size: 12px; min-height: 220px; resize: vertical; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; }
+    .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+    .checkbox-row input[type=checkbox] { width: auto; }
+    .checkbox-row label { margin: 0; font-weight: normal; }
+    button.primary { background: #1e3a8a; color: #fff; border: none; padding: 12px 16px; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: 600; margin-top: 16px; width: 100%; }
+    button.primary:disabled { opacity: 0.6; cursor: wait; }
+    button.secondary { background: #fff; border: 1px solid #d1d5db; padding: 10px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+    .hint { font-size: 12px; color: #6b7280; margin-top: 4px; line-height: 1.4; }
+    .hint code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+    .status { font-size: 13px; margin-top: 12px; min-height: 1.4em; }
+    .status.ok { color: #166534; }
+    .status.err { color: #b91c1c; }
+    .output-wrap { margin-top: 16px; }
+    .output-wrap label { margin-top: 0; }
+    .copy-row { display: flex; gap: 8px; margin-top: 8px; align-items: flex-start; }
+    .copy-row textarea { flex: 1; }
+    .copy-row button { flex: 0 0 auto; margin-top: 2px; }
+    .hidden { display: none !important; }
+    .divider { border: none; border-top: 1px solid #e5e7eb; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <h1>🔬 Admin Tools</h1>
+  <p class="lead">Research Portal — internal utilities. Runs entirely in your browser.</p>
+
+  <div class="warn">
+    <strong>How this works:</strong> these tools <em>generate SQL</em>. Nothing is executed here — you copy the SQL and paste it into <strong>Supabase → SQL Editor</strong> to apply the change. Nothing leaves your browser.
+  </div>
+
+  <nav class="tabs">
+    <button data-tab="institution" class="active">🏫 Add Institution</button>
+    <button data-tab="coresearcher">👤 Add Co-researcher</button>
+    <button data-tab="grant">🎓 Grant Study</button>
+    <button data-tab="hasher">🔑 Hash Only</button>
+  </nav>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- TAB 1: ADD INSTITUTION                                          -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <section id="panel-institution" class="panel active">
+    <h2>Add a new institution</h2>
+    <div class="hint" style="margin-bottom: 12px;">
+      Before running the generated SQL, check what's already there:
+      <code>SELECT value, display_order FROM dropdown_options WHERE category='institution' ORDER BY display_order;</code>
+    </div>
+
+    <label for="inst-name">Institution name (exact string participants will see)</label>
+    <input type="text" id="inst-name" placeholder="e.g. Federal University, Lokoja" autocomplete="off">
+
+    <label for="inst-order">Display order (leave blank to auto-assign as max + 10)</label>
+    <input type="number" id="inst-order" placeholder="e.g. 10" min="1">
+
+    <button class="primary" id="btn-gen-inst">Generate INSERT SQL</button>
+
+    <div class="output-wrap hidden" id="inst-output-wrap">
+      <label>SQL — copy and paste into Supabase SQL Editor:</label>
+      <div class="copy-row">
+        <textarea id="inst-output" readonly></textarea>
+        <button class="secondary" onclick="copyTo('inst-output', 'inst-status')">📋 Copy</button>
+      </div>
+      <p class="status" id="inst-status"></p>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- TAB 2: ADD CO-RESEARCHER                                        -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <section id="panel-coresearcher" class="panel">
+    <h2>Add a co-researcher</h2>
+    <div class="hint" style="margin-bottom: 12px;">
+      Confirm exact IDs/strings in Supabase first: <code>SELECT id, value FROM dropdown_options WHERE category='institution'</code> and <code>SELECT id, study_key FROM studies</code>.
+    </div>
+
+    <label for="cr-email">Email (his/her login)</label>
+    <input type="email" id="cr-email" placeholder="e.g. someone@institution.edu.ng" autocomplete="off">
+
+    <label for="cr-name">Full name</label>
+    <input type="text" id="cr-name" placeholder="e.g. Dr Adebayo Tolorunleke" autocomplete="off">
+
+    <label for="cr-institution">Institution (EXACT match from dropdown_options)</label>
+    <input type="text" id="cr-institution" placeholder="e.g. Federal University, Lokoja" autocomplete="off">
+
+    <label for="cr-studies">Study IDs (comma-separated)</label>
+    <input type="text" id="cr-studies" placeholder="e.g. 2 or 2,5" autocomplete="off">
+
+    <label for="cr-password">Initial password (they change on first login)</label>
+    <input type="password" id="cr-password" placeholder="min 8 characters" autocomplete="new-password">
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="cr-can-export">
+      <label for="cr-can-export">Enable export on this account (default: off)</label>
+    </div>
+
+    <button class="primary" id="btn-gen-cr">Generate INSERT SQL (with password hash)</button>
+
+    <p class="status" id="cr-status"></p>
+
+    <div class="output-wrap hidden" id="cr-output-wrap">
+      <label>SQL — copy and paste into Supabase SQL Editor:</label>
+      <div class="copy-row">
+        <textarea id="cr-output" readonly></textarea>
+        <button class="secondary" onclick="copyTo('cr-output', 'cr-status')">📋 Copy</button>
+      </div>
+      <p class="hint">After running it in Supabase, send the <strong>plain password</strong> to the co-researcher — not the SQL, not the hash.</p>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- TAB 3: GRANT STUDY ACCESS                                       -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <section id="panel-grant" class="panel">
+    <h2>Grant a study to an existing co-researcher</h2>
+    <div class="hint" style="margin-bottom: 12px;">
+      Use this when a new study becomes relevant to someone already onboarded. <strong>Do not recreate the account</strong> — that loses their password and audit trail.
+    </div>
+
+    <label for="grant-email">Co-researcher email</label>
+    <input type="email" id="grant-email" placeholder="e.g. someone@institution.edu.ng" autocomplete="off">
+
+    <label for="grant-study">Study ID to add</label>
+    <input type="number" id="grant-study" placeholder="e.g. 5" min="1">
+
+    <button class="primary" id="btn-gen-grant">Generate UPDATE SQL</button>
+
+    <div class="output-wrap hidden" id="grant-output-wrap">
+      <label>SQL — copy and paste into Supabase SQL Editor:</label>
+      <div class="copy-row">
+        <textarea id="grant-output" readonly></textarea>
+        <button class="secondary" onclick="copyTo('grant-output', 'grant-status')">📋 Copy</button>
+      </div>
+      <p class="status" id="grant-status"></p>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- TAB 4: HASH ONLY                                                -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <section id="panel-hasher" class="panel">
+    <h2>Password hasher only</h2>
+    <div class="hint" style="margin-bottom: 12px;">
+      For when you need just the hash — e.g. to reset a password via UPDATE, or to construct SQL manually. Output format: <code>salt:hash</code> (161 characters).
+    </div>
+
+    <label for="hash-input">Password to hash</label>
+    <input type="password" id="hash-input" autocomplete="off">
+
+    <button class="primary" id="btn-hash-only">Generate hash</button>
+
+    <div class="output-wrap hidden" id="hash-output-wrap">
+      <label>Hash — paste as <code>$hash$…$hash$</code> in SQL:</label>
+      <div class="copy-row">
+        <textarea id="hash-output" readonly style="min-height: 100px;"></textarea>
+        <button class="secondary" onclick="copyTo('hash-output', 'hash-status')">📋 Copy</button>
+      </div>
+      <p class="status" id="hash-status"></p>
+    </div>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/scrypt-js@3.0.1/scrypt.js"></script>
+  <script>
+    // ───────────── Helpers ─────────────
+    function toHex(u8) {
+      return Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function hashPassword(plain) {
+      if (!window.scrypt || !window.scrypt.scrypt) {
+        throw new Error('scrypt library failed to load. Check your internet connection and reload.');
+      }
+      const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+      const salt = toHex(saltBytes);
+      const pwBuf   = new TextEncoder().encode(plain);
+      const saltBuf = new TextEncoder().encode(salt);
+      let hashBuf;
+      if (window.scrypt.scryptSync) {
+        hashBuf = window.scrypt.scryptSync(pwBuf, saltBuf, 16384, 8, 1, 64);
+      } else {
+        hashBuf = await window.scrypt.scrypt(pwBuf, saltBuf, 16384, 8, 1, 64);
+      }
+      return salt + ':' + toHex(hashBuf);
+    }
+
+    function sqlEscape(s) {
+      return String(s).replace(/'/g, "''");
+    }
+
+    async function copyTo(outputId, statusId) {
+      const el = document.getElementById(outputId);
+      const status = document.getElementById(statusId);
+      if (!el || !el.value) {
+        if (status) { status.textContent = 'Nothing to copy yet.'; status.className = 'status err'; }
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(el.value);
+        status.textContent = '📋 Copied to clipboard.';
+        status.className = 'status ok';
+      } catch {
+        el.focus(); el.select(); el.setSelectionRange(0, 999999);
+        try {
+          document.execCommand('copy');
+          status.textContent = '📋 Copied.';
+          status.className = 'status ok';
+        } catch {
+          status.textContent = 'Could not copy automatically — long-press the box and select all.';
+          status.className = 'status err';
+        }
+      }
+    }
+
+    // ───────────── Tabs ─────────────
+    document.querySelectorAll('.tabs button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+      });
+    });
+
+    // ───────────── TAB 1: Add institution ─────────────
+    document.getElementById('btn-gen-inst').addEventListener('click', () => {
+      const name = document.getElementById('inst-name').value.trim();
+      const orderRaw = document.getElementById('inst-order').value.trim();
+      if (!name) { alert('Institution name is required.'); return; }
+
+      const orderClause = orderRaw
+        ? String(parseInt(orderRaw, 10))
+        : `(SELECT COALESCE(MAX(display_order), 0) + 10 FROM dropdown_options WHERE category='institution')`;
+
+      const sql =
+`INSERT INTO dropdown_options (category, value, display_order, active)
+VALUES (
+  'institution',
+  '${sqlEscape(name)}',
+  ${orderClause},
+  true
+);`;
+
+      document.getElementById('inst-output').value = sql;
+      document.getElementById('inst-output-wrap').classList.remove('hidden');
+    });
+
+    // ───────────── TAB 2: Add co-researcher ─────────────
+    document.getElementById('btn-gen-cr').addEventListener('click', async () => {
+      const status = document.getElementById('cr-status');
+      const btn    = document.getElementById('btn-gen-cr');
+
+      const email       = document.getElementById('cr-email').value.trim();
+      const name        = document.getElementById('cr-name').value.trim();
+      const institution = document.getElementById('cr-institution').value.trim();
+      const studiesRaw  = document.getElementById('cr-studies').value.trim();
+      const password    = document.getElementById('cr-password').value;
+      const canExport   = document.getElementById('cr-can-export').checked;
+
+      const fail = (msg) => { status.textContent = msg; status.className = 'status err'; };
+      if (!email || !email.includes('@'))        return fail('Valid email required.');
+      if (!name)                                  return fail('Name required.');
+      if (!institution)                           return fail('Institution required.');
+      if (!studiesRaw)                            return fail('At least one study ID required.');
+      if (!password || password.length < 8)       return fail('Password must be at least 8 characters.');
+
+      const studyIds = studiesRaw.split(',')
+        .map(s => parseInt(s.trim(), 10))
+        .filter(n => Number.isInteger(n) && n > 0);
+      if (!studyIds.length) return fail('Study IDs must be positive integers, e.g. "2" or "2,5".');
+
+      btn.disabled = true;
+      status.textContent = 'Hashing password…';
+      status.className = 'status';
+
+      try {
+        const hash = await hashPassword(password);
+        const arrayLiteral = 'ARRAY[' + studyIds.join(',') + ']::integer[]';
+
+        const sql =
+`INSERT INTO admin_users (
+  email,
+  name,
+  institution,
+  role,
+  scoped_studies,
+  can_export,
+  can_manage_portal,
+  can_send_reminders,
+  can_view_participant,
+  is_active,
+  password_hash
+) VALUES (
+  '${sqlEscape(email)}',
+  '${sqlEscape(name)}',
+  '${sqlEscape(institution)}',
+  'co_researcher',
+  ${arrayLiteral},
+  ${canExport ? 'true' : 'false'},
+  false,
+  true,
+  false,
+  true,
+  $hash$${hash}$hash$
+);`;
+
+        document.getElementById('cr-output').value = sql;
+        document.getElementById('cr-output-wrap').classList.remove('hidden');
+        status.textContent = '✅ SQL generated. Copy it and run in Supabase.';
+        status.className = 'status ok';
+      } catch (err) {
+        fail('❌ ' + (err.message || String(err)));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ───────────── TAB 3: Grant study ─────────────
+    document.getElementById('btn-gen-grant').addEventListener('click', () => {
+      const email     = document.getElementById('grant-email').value.trim();
+      const studyRaw  = document.getElementById('grant-study').value.trim();
+      const studyId   = parseInt(studyRaw, 10);
+
+      if (!email || !email.includes('@'))                  { alert('Valid email required.'); return; }
+      if (!Number.isInteger(studyId) || studyId <= 0)      { alert('Valid study ID required.'); return; }
+
+      const sql =
+`UPDATE admin_users
+SET scoped_studies = array_append(scoped_studies, ${studyId})
+WHERE LOWER(email) = LOWER('${sqlEscape(email)}')
+  AND NOT (${studyId} = ANY(scoped_studies));`;
+
+      document.getElementById('grant-output').value = sql;
+      document.getElementById('grant-output-wrap').classList.remove('hidden');
+    });
+
+    // ───────────── TAB 4: Hash only ─────────────
+    document.getElementById('btn-hash-only').addEventListener('click', async () => {
+      const status = document.getElementById('hash-status');
+      const btn    = document.getElementById('btn-hash-only');
+      const pw     = document.getElementById('hash-input').value;
+
+      if (!pw) { status.textContent = 'Enter a password.'; status.className = 'status err'; return; }
+
+      btn.disabled = true;
+      status.textContent = 'Hashing… (~1 second)';
+      status.className = 'status';
+
+      try {
+        const hash = await hashPassword(pw);
+        document.getElementById('hash-output').value = hash;
+        document.getElementById('hash-output-wrap').classList.remove('hidden');
+        status.textContent = '✅ Done — tap Copy.';
+        status.className = 'status ok';
+      } catch (err) {
+        status.textContent = '❌ ' + (err.message || String(err));
+        status.className = 'status err';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
